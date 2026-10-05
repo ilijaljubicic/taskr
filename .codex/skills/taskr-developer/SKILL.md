@@ -85,6 +85,10 @@ User-facing surfaces to keep aligned:
 - MCP tool schemas and handlers.
 - CLI flags and subcommands.
 - README and bundled Codex and Claude skills.
+- Keep README focused on capabilities and the project/plan/task model. Put
+  installation, CLI, environment, MCP, and development details in the matching
+  guides under `docs/` (`installation.md`, `cli.md`, `environments.md`, `mcp.md`,
+  and `development.md`). Update links when moving a contract.
 - `.codex/skills/taskr-*` and `.claude/skills/taskr-*` skills and
   `references/mcp-recipes.md`; keep matching copies synchronized.
 - Installed taskr skills in default and project-specific Codex/Claude homes
@@ -148,8 +152,9 @@ User-facing surfaces to keep aligned:
   tools (`--enable-admin-tools`).
 - Keep task orchestration simple in v1. Prefer strings for descriptive role,
   kind, and skill metadata unless the value controls runtime authority.
-- When adding MCP tools, update schema, handler, tests, README, and relevant
-  Codex and Claude skills/recipes in the same change.
+- When adding MCP tools, update schema, handler, tests, `docs/mcp.md`, affected
+  guides, and relevant Codex and Claude skills/recipes in the same change.
+  Update the README when the capabilities or work model change.
 - Choose the layout group from the initial launch template, not role/kind
   strings or later prompts. Persist actual layout IDs; labels never confer
   ownership. Serialize allocation and last-pane closure per plan/endpoint.

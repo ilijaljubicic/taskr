@@ -73,7 +73,7 @@ TASKR's essential responsibilities are:
 - MCP access for supervising agents and external controllers.
 
 The existing model and scheduling rules are documented in
-[README.md](README.md#orchestration) and implemented in
+[the orchestration guide](docs/orchestration.md) and implemented in
 [orchestration.rs](crates/taskr-core/src/orchestration.rs).
 
 The original comparison established that the products organize different
@@ -92,7 +92,7 @@ OpenCode, and Kimi. Herdr documents broader coverage, detection manifests, and
 integration-reported state. That creates an opportunity to reduce duplicated
 agent-specific terminal maintenance; additional TASKR agent support still needs
 explicit capability validation.
-[TASKR launch profiles](README.md#launch-profiles),
+[TASKR launch profiles](docs/environments.md),
 [Herdr agents](https://herdr.dev/docs/agents/)
 
 ## 2. Accepted decisions
@@ -239,10 +239,10 @@ work. Verify this separation in the integration availability tests.
 | TASKR endpoint connection | Selecting local or remote Herdr and carrying supported requests/responses. |
 | Deployment connectivity | SSH routing, forwarding, or bridges needed to expose an isolated server as a normal remote endpoint. |
 
-Microsandbox lifecycle and mounts are already external to TASKR. The current
-host-side connector invokes commands inside an existing sandbox and keeps
-controller credentials on the host.
-[Current Microsandbox example](example-backends/microsandbox/README.md)
+Before Herdr delegation, the host-side Microsandbox connector invoked commands
+inside an existing sandbox and kept controller credentials on the host. That
+connector and `example-backends/microsandbox/README.md` have been retired; see
+[deployment](docs/deployment.md) for Herdr endpoints.
 
 ## 4. Retained responsibilities and retirement scope
 
@@ -452,8 +452,8 @@ Preserve fast inspection during startup and waits. TASKR's direct launch
 currently returns without waiting for readiness, while scheduler starts wait
 before submitting task context. A blocking Herdr call must run through bounded
 runtime work so it does not stall MCP reads, state checks, or cancellation.
-[Current session contract](README.md#sessions),
-[Current runtime waits](README.md#mcp-surface)
+[Current session contract](docs/executions.md),
+[Current runtime waits](docs/mcp.md)
 
 ### Launch policy and configuration
 
@@ -536,7 +536,7 @@ transfer the controller's configuration or login. D25 adds explicit companion
 preparation before launch; it does not change the meaning of an endpoint path.
 Changes affect future launches; there is no generic Herdr operation to reprofile
 an already running agent.
-[Current TASKR coder-home contract](README.md#per-project-coder-homes)
+[Current TASKR coder-home contract](docs/environments.md#existing-project-home-constraints)
 
 Provision Herdr integrations in the selected homes on each execution endpoint.
 The Codex and Claude integration installers respect `CODEX_HOME` and
@@ -857,7 +857,7 @@ live process cwd, and task `include_paths`/`exclude_paths`. A worker may change
 directories while running; a shared directory does not prove shared project or
 task ownership. Herdr can expose `foreground_cwd` when resolvable, separately
 from its existing pane/workspace `cwd`; these are observations, not task scope.
-[Current TASKR workspace contract](README.md#sessions),
+[Current TASKR workspace contract](docs/executions.md),
 [Herdr cwd observations](https://herdr.dev/docs/socket-api/)
 
 Initially validate Codex, Claude, OpenCode, and Kimi. Broader agent coverage can
@@ -989,7 +989,7 @@ For the canonical implementation -> validation -> downstream example:
 Keep the supported edge semantics: `DependsOn`, `ParentOf`, `Validates`,
 `Audits`, `Supersedes`, and `Related`. `Audits` remains non-gating traceability;
 use `Validates` for an approval that must gate dependent work.
-[TASKR orchestration semantics](README.md#orchestration)
+[TASKR orchestration semantics](docs/orchestration.md)
 
 Scheduling remains explicit through `task_start` or `orchestration_next`.
 Delegating execution does not introduce a continuous autonomous scheduler or
@@ -1190,9 +1190,8 @@ not a subprocess-name replacement.
 Relevant source anchors:
 [controller](crates/taskr-controller/src/lib.rs),
 [task/session model](crates/taskr-core/src/orchestration.rs),
-[node implementation](crates/taskr-node/src/lib.rs),
-[wire schema](crates/taskr-wire/proto/taskr/wire/v1/taskr_node.proto),
 [durable store](crates/taskr-controller/src/store.rs).
+The former node implementation and wire schema are retired components.
 
 ### Module and dependency replacement
 
@@ -1216,7 +1215,7 @@ silently downloads during task launch.
 ### CLI commands: keep, change, remove
 
 These are proposed cutover changes based on the current entrypoints in
-[src/main.rs](src/main.rs) and [README CLI reference](README.md#cli-entrypoints).
+[src/main.rs](src/main.rs) and [CLI reference](docs/cli.md).
 Deprecated here means removed from the final Herdr-only release, with migration
 notes and clear parser errors; it does not mean an indefinitely supported alias.
 

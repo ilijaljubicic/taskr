@@ -11,6 +11,11 @@ Use this skill to operate taskr as the controller, not the worker. Create and
 supervise task executions, assign focused tasks, read concise results, and
 intervene only when needed.
 
+Projects contain plans, and plans contain tasks. Each task execution selects a
+Herdr endpoint, a prepared launch profile on that endpoint, and a working
+directory. Tasks in one project can use different profiles and machines; a
+profile can serve tasks from multiple projects.
+
 Primary use cases:
 
 - Drive coding-agent CLIs through taskr MCP tools; Herdr owns the terminals.

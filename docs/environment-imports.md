@@ -39,7 +39,7 @@ profiles, and `source_location`. Select one ID/revision and use
 `admin_environment_sync` with an explicit endpoint and credential policy,
 then poll status and choose a returned launch profile. This prepares one
 environment per invocation; repeat for other homes or endpoints. No coding
-agent starts during discovery or sync. See [launch setup](../README.md#launch-profiles).
+agent starts during discovery or sync. See [launch setup](environments.md).
 
 ## Optional manifest
 
