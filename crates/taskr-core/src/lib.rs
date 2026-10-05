@@ -4,7 +4,7 @@
 //! supply a [`SnapshotStore`] and serialize mutations through [`Orchestrator`].
 //! Persistence format, migrations, execution adapters, scheduling, clocks, MCP
 //! transports and resource cleanup belong to the host. There are no SQLite,
-//! filesystem, Tokio, Herdr, Reqvire or ScopeTrail dependencies here.
+//! filesystem, Tokio, Herdr or ScopeTrail dependencies here.
 //!
 //! Native hosts and single-threaded Wasm hosts use the same API; stores need not
 //! implement `Send` or `Sync`. JavaScript/Wasm hosts enable the `wasm-js` feature

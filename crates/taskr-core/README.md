@@ -6,8 +6,8 @@ including Cloudflare Workers with Durable Objects.
 The core contains the project → plan → task model, edges, dependency/status
 rules, gates/outcomes/blockers, execution records and `Orchestrator<S>`, a
 transactional state service. Its normal dependencies are Serde and UUID.
-It contains no SQLite, filesystem access, Tokio, MCP transport, Reqvire model,
-ScopeTrail runtime or execution adapter implementation.
+It contains no SQLite, filesystem access, Tokio, MCP transport, ScopeTrail
+runtime or execution adapter implementation.
 
 | Boundary | Core | Embedding host |
 | --- | --- | --- |
@@ -44,7 +44,7 @@ let mut orchestration = taskr_core::Orchestrator::open(host_store)?;
 let project = orchestration.mutate(host_now_ms, |state, now| {
     state.create_project(taskr_core::orchestration::CreateProject {
         title: "Implement capability".into(),
-        description: "Tasks may exist without a Reqvire system model".into(),
+        description: "Coordinate implementation tasks through the host store".into(),
         ..Default::default()
     }, now)
 })?;
@@ -132,7 +132,6 @@ native dependencies or runtime bounds in the core break the portability check.
 Rust consumers use `taskr_core`. The native host packages are
 `taskr-controller`, `taskr-herdr` and `taskr-environment`, with a `taskr`
 executable. MCP tool names and snapshot serialization remain stable.
-Reqvire Agent integration is a subsequent host change.
 
 `Passed` remains an intermediate domain status. The native controller treats
 `Passed`, `Delivered`, `Canceled`, and `Failed` as worker exit points, holding

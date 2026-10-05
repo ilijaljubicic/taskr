@@ -10,15 +10,6 @@ taskr does not own terminals. Terminal and coding-CLI execution is delegated to
 engine. The controller tells Herdr where and how to start an agent, observes
 the result, and drives the agent through MCP tools.
 
-The reusable orchestration library is [taskr-core](crates/taskr-core/README.md).
-It owns domain state and transactional mutations through a storage interface.
-TASKR supplies SQLite persistence, MCP transport and Herdr execution integration.
-Other hosts can embed the core with their own stores and adapters, without a
-Reqvire system model or the TASKR controller. The core supports native and
-`wasm32-unknown-unknown` builds; `make check-core-wasm` checks its public APIs
-for a Workers host. A Cloudflare Durable Object host provides its own
-storage, alarms and execution SDK bindings; that host is not implemented yet.
-
 The core idea is simple:
 
 - `taskr controller` exposes the MCP HTTP endpoint and owns the durable

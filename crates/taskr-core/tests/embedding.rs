@@ -56,7 +56,7 @@ impl SnapshotStore for MemoryStore {
 fn project() -> CreateProject {
     CreateProject {
         title: "Reusable orchestration".into(),
-        description: "A host without a Reqvire model or an execution adapter".into(),
+        description: "A host-defined store with no execution adapter".into(),
         ..Default::default()
     }
 }
