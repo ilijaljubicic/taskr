@@ -184,12 +184,12 @@ struct Cli {
     store_path: Option<PathBuf>,
     #[arg(
         long,
-        help = "Permit MCP without bearer auth and ignore TASKR_MCP_TOKEN. Intended only behind localhost-only port forwarding."
+        help = "Disable MCP bearer auth and the token environment fallback. Conflicts with --mcp-token and --mcp-token-file."
     )]
     allow_remote_without_mcp_token: bool,
     #[arg(
         long,
-        help = "Enable admin-only MCP tools that create or change project boundaries."
+        help = "Enable project administration, environment discovery/sync, endpoint migration and endpoint-agent debugging."
     )]
     enable_admin_tools: bool,
     #[arg(

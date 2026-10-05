@@ -77,28 +77,22 @@ local store setup, use
 {"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"project_list","arguments":{}}}
 ```
 
-Optional project fields: `codex_home`, `claude_home`, `opencode_home`, and
-`kimi_home`. They map to `CODEX_HOME`, `CLAUDE_CONFIG_DIR`,
-`OPENCODE_CONFIG_DIR`, and `KIMI_CODE_HOME` respectively. Omitted/null fields
-on creation pass no home override. Configure absolute endpoint paths or
-`~/...`; taskr does not provision homes or copy authentication.
+For new projects, omit `codex_home`, `claude_home`, `opencode_home`, and
+`kimi_home`. Select a prepared `launch_profile_id` for the execution endpoint
+when starting a task; that profile supplies the agent home and configuration.
+Stored project homes are legacy constraints: a value conflicting with the
+selected deployment home causes launch rejection.
 
-Update an existing project (requires `--enable-admin-tools`):
-
-```json
-{"jsonrpc":"2.0","id":51,"method":"tools/call","params":{"name":"project_update","arguments":{"project_id":"example","codex_home":"/home/user/.codex-example","claude_home":"/home/user/.claude-example"}}}
-```
-
-Clear just the Codex override; other homes remain unchanged:
+Clear legacy home constraints (requires `--enable-admin-tools`):
 
 ```json
-{"jsonrpc":"2.0","id":52,"method":"tools/call","params":{"name":"project_update","arguments":{"project_id":"example","codex_home":null}}}
+{"jsonrpc":"2.0","id":51,"method":"tools/call","params":{"name":"project_update","arguments":{"project_id":"example","codex_home":null,"claude_home":null,"opencode_home":null,"kimi_home":null}}}
 ```
 
-The running controller uses updates immediately for the next launch
-(manual, scheduled, or recovery), without a restart. Already-live
-executions keep their original environment. `project_list` and
-`orchestration_status` return the current home fields.
+Explicit `null` clears a field; omitted fields keep their current values. The
+next launch uses the updated constraints without a restart. Existing executions
+keep their frozen environment. `project_list` and `orchestration_status` return
+the stored home fields.
 
 ## Plans
 

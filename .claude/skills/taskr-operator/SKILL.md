@@ -48,8 +48,8 @@ Discovery and state tools:
 
 Project, plan, and task tools:
 
-- `project_create`: create a project boundary through MCP, optionally with per-agent homes.
-- `project_update`: update or clear project agent homes through admin MCP; future launches use changes immediately without a controller restart.
+- `project_create`: create a project boundary through MCP; select agent environments through prepared launch profiles when starting tasks.
+- `project_update`: clear legacy project home constraints through admin MCP; omitted fields retain their values, and live executions keep their frozen environment.
 - `plan_create`, `plan_list`, `plan_update`, `plan_status_update`, `plan_get`:
   manage plan work-package documents and status; `plan_get` returns one full
   stored plan body including its brief and optional instructions.

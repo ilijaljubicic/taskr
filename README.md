@@ -28,11 +28,8 @@ The core idea is simple:
 
 ## Project Status
 
-taskr is in early development. The project aims to provide a secure control
-plane for agent orchestration, but interfaces, configuration, and runtime
-behavior may still change in breaking ways. Security guarantees cannot be made
-at this stage. Review the configuration for your environment and use taskr at
-your own risk.
+taskr is in early development. Interfaces, configuration, and runtime behavior
+may change in breaking ways.
 
 ## Prerequisites
 
@@ -49,11 +46,10 @@ documented in [docs/deployment.md](docs/deployment.md).
 
 ### Run from npm
 
-These commands apply once a Taskr npm release has been published. Until then,
-build and run the renamed source with `make run-local`.
+The package is published on npm as [@mmux/taskr](https://www.npmjs.com/package/@mmux/taskr).
 
-For a local loopback-only MCP server driving the local Herdr session (least
-secure version; run only in trusted environments):
+For a local loopback-only MCP server driving the local Herdr session without
+bearer authentication:
 
 ```bash
 npx --yes @mmux/taskr controller --allow-remote-without-mcp-token
@@ -105,9 +101,6 @@ Use [Launch Profiles](#launch-profiles) to discover and sync a native environmen
 through the admin MCP tools, then select one prepared launch choice.
 
 ### Install native binary
-
-Taskr-named native archives will be available with the first Taskr release.
-Until then, build and run the source with `make run-local`.
 
 Install the latest released `taskr` binary:
 
@@ -173,13 +166,10 @@ but still returned in the MCP response envelope.
 | Command | Purpose |
 | ------- | ------- |
 | `taskr controller` | Runs the MCP control plane. Every terminal operation is delegated to Herdr. |
-| `taskr create-project <title> --description <text>` | Creates a durable orchestration project in the local taskr store. Supports optional `--slug <slug>` and per-agent `--codex-home`, `--claude-home`, `--opencode-home`, `--kimi-home` paths. |
+| `taskr create-project <title> --description <text>` | Creates a durable orchestration project in the local taskr store. Supports optional `--slug <slug>`. Agent environments are selected through endpoint launch profiles when starting tasks. |
 | `taskr delete-project <id-or-slug>` | Deletes a durable orchestration project from the local taskr store, including all contained plans, task cards, and task edges. |
 | `taskr list-projects` | Lists durable orchestration projects from the local taskr store so project ids/slugs are discoverable. |
 | `taskr prune` | Removes old retained worker terminals, stale execution records, and finished plans after observing Herdr endpoints. Defaults to dry-run, all categories included, and `--older-than-days 14`; pass `--execute` to apply cleanup. |
-
-`src/main.rs` dispatches to the controller when no subcommand matches, so
-`taskr --herdr-bin herdr` is equivalent to `taskr controller --herdr-bin herdr`.
 
 Important controller flags:
 
@@ -187,15 +177,15 @@ Important controller flags:
 | ---- | ------- | ------- |
 | `--host` | `127.0.0.1` | Bind host for the MCP HTTP server. |
 | `--port` | `3000` | Bind port. |
-| `--mcp-token` | `TASKR_MCP_TOKEN` | Bearer token for MCP requests. |
+| `--mcp-token` | none | Explicit bearer token for MCP requests; otherwise read the selected token file or environment variable. |
 | `--mcp-token-file` | none | Reads the MCP bearer token from a file. Prefer `/run/secrets` paths in containers. |
 | `--mcp-token-env` | `TASKR_MCP_TOKEN` | Env var used when MCP token flags are omitted. |
-| `--allow-remote-without-mcp-token` | false | Allows MCP without bearer auth and ignores `TASKR_MCP_TOKEN`; mutually exclusive with explicit MCP token flags. |
+| `--allow-remote-without-mcp-token` | false | Disables bearer auth, including the token environment fallback; conflicts with `--mcp-token` and `--mcp-token-file`. |
 | `--store-path` | `~/.taskr` | Directory for durable state (`taskr.db`). |
-| `--enable-admin-tools` | false | Enables admin-only MCP tools that create or change project boundaries. |
+| `--enable-admin-tools` | false | Enables project administration, environment discovery/sync, endpoint migration, and endpoint-agent debugging. |
 | `--herdr-bin` | `herdr` | Herdr executable used for every terminal operation. |
 | `--herdr-session` | none | Explicit local Herdr session selection. Never affects saved-machine endpoints. |
-| `--environment-python-bin` | `python3` | Python 3.11+ for local environment discovery/preparation. |
+| `--environment-python-bin` | `python3` | Python 3.11+ executable for the local environment companion. |
 | `--environment-ssh-bin` | `ssh` | OpenSSH client for environment sync to saved Herdr machines. |
 | `--max-timeout-seconds` | `120` | Maximum wait timeout accepted by wait tools. |
 | `--max-request-bytes` | `2097152` | Maximum MCP HTTP request body size. |
@@ -228,90 +218,6 @@ Pass entrypoint flags through the target variable:
 
 ```bash
 make run-local LOCAL_ARGS="--port 3001 --enable-admin-tools"
-```
-
-Release publishing uses git tags. The release version comes from
-`[workspace.package].version` in top-level `Cargo.toml`; all crates inherit it
-with `version.workspace = true`. Bump that version with `make update-patch`,
-`make update-minor`, or `make update-major`, merge the version change to
-`main`, then run `make release-tag` from a clean `main` checkout. The
-`v<version>` tag triggers GitHub Actions to build and attach platform archives
-used by `scripts/install.sh`, then publish the npm package with all supported
-platform archives.
-
-### Configure npm publishing
-
-The npm package is `@mmux/taskr`; its command is `taskr`. The `@mmux` npm scope
-is independent of the GitHub repository name, `ilijaljubicic/taskr`. The old
-`@mmux/mmux` package and its trusted-publisher connection are separate.
-
-For a new package, npm requires an initial publication before configuring a
-trusted publisher. From a reviewed checkout, build the local package and log
-in with an npm account that can publish to `@mmux`:
-
-```bash
-make npm-package
-cd npm/taskr
-npm pack --dry-run
-npm login --registry https://registry.npmjs.org
-npm whoami --registry https://registry.npmjs.org
-npm publish --access public --tag bootstrap
-```
-
-Confirm that `npm whoami` succeeds and reports an account allowed to create
-packages in `@mmux`. A user-owned scope requires that user's account; an
-organization scope requires the appropriate organization access. Access to an
-existing package does not grant creation rights in another user's scope. If
-`npm whoami` returns 401, renew the CLI login before retrying the publish.
-[npm scope ownership](https://docs.npmjs.com/about-scopes/)
-
-This first publication contains the current platform's binary and uses the
-`bootstrap` tag. Use the release workflow for the first all-platform `latest`
-version. A published version cannot be reused: if the bootstrap version is
-`0.4.0`, the subsequent release must use a new version, such as `0.5.0`.
-[npm package trust prerequisites](https://docs.npmjs.com/cli/v11/commands/npm-trust/)
-
-Open `@mmux/taskr` on npm, select Settings → Trusted Publisher → GitHub Actions,
-and configure:
-
-| Field | Value |
-| --- | --- |
-| Organization or user | `ilijaljubicic` |
-| Repository | `taskr` |
-| Workflow filename | `release.yml` |
-| Environment name | Leave empty; the release job has no GitHub environment. |
-| Allowed actions | Enable direct publishing with `npm publish`. |
-
-The release workflow uses Node.js 24 and `id-token: write` for OIDC, without an
-npm publishing token. The publisher must match the repository and workflow
-exactly. Commit/merge the package changes and version bump to `main`, then use
-`make release-tag` from a clean `main` checkout. The workflow builds Linux and
-both macOS binaries and publishes the complete package.
-[npm trusted publishing](https://docs.npmjs.com/trusted-publishers/)
-
-### Inspect the npm package locally
-
-The `npm/taskr` package provides an `npx`/`yarn dlx` wrapper around the native
-`taskr` binary. To inspect the package from this workstation:
-
-```bash
-make npm-pack-dry-run
-```
-
-`make npm-package` builds the current platform, writes
-`npm/taskr/artifacts/taskr-<platform>.tar.gz`, and syncs the npm package version
-from `[workspace.package].version`. The local package only contains the current
-platform archive; public npm publishing is done by the GitHub release workflow
-so the package contains all supported platform archives.
-
-`make npm-pack` creates a `.tgz` without publishing. Set `NPM_CACHE=/path/to/cache`
-if npm should use a cache directory other than `/tmp/taskr-npm-cache`.
-
-The published package can be run with:
-
-```bash
-npx @mmux/taskr controller
-yarn dlx @mmux/taskr controller
 ```
 
 ## Launch Profiles
@@ -436,13 +342,13 @@ and explicitly update future task `run_spec.launch_profile_id` values with
 conversations relocated; pre-cutover sessions remain available in their original
 native homes for direct native resume through Herdr.
 
-## Per-project agent homes
+## Legacy project home constraints
 
 Projects retain optional `codex_home`, `claude_home`, `opencode_home`, and
-`kimi_home` metadata for existing stores and the retained project CLI. With a
-prepared environment, a configured project home must exactly match its resolved
-deployment home; a conflict is rejected. Normally leave these fields `null` and
-let the prepared launch choice supply the home. `project_update` (admin) clears
+`kimi_home` fields from earlier configuration. For new projects, leave these
+fields `null`; the prepared launch profile supplies the agent's home. A stored
+project home must exactly match the selected deployment home or the launch is
+rejected. `project_update` (admin) clears
 an override with explicit `null`; omission preserves its value. Existing
 executions keep their frozen environment.
 
@@ -791,11 +697,9 @@ The `x-mcp-token` header is accepted as an alternative. Cross-site browser
 requests (`Sec-Fetch-Site: cross-site`) are rejected to blunt DNS-rebinding
 and drive-by POSTs.
 
-Controller credentials stay out of worker environments: launch profiles carry
-non-secret configuration environment only, and per-project agent homes are
-configuration paths, not credential stores. Do not put secrets into
-`profiles[].env`; provision credentials on the endpoint through your own
-mechanism.
+Controller credentials stay out of worker environments. Prepared launch profiles
+supply configuration; native credentials are provisioned on the endpoint or
+transferred through an explicitly selected environment-sync credential policy.
 
 TASKR filesystem access and file transfer are deferred. The `read_file` and
 `save_file` MCP tools have been removed; calls to those names fail as unknown

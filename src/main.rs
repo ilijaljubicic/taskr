@@ -141,46 +141,22 @@ fn run_create_project(store_path: Option<PathBuf>, raw_args: &[OsString]) -> i32
 }
 
 fn print_create_project_help() {
-    println!("usage: taskr create-project <title> --description <text> [--slug <slug>] [--codex-home <path>] [--claude-home <path>] [--opencode-home <path>] [--kimi-home <path>]");
-    println!("Optional homes are per-project configuration-home overrides applied on execution endpoints.");
+    println!("usage: taskr create-project <title> --description <text> [--slug <slug>]");
     println!();
     println!("Creates a durable orchestration project in taskr.db.");
+    println!("Select a prepared endpoint launch profile when starting a task.");
 }
 
 fn parse_create_project_args(raw_args: &[OsString]) -> Result<CreateProjectArgs, String> {
     let mut title = None;
     let mut description = None;
     let mut slug = None;
-    let mut homes = CreateProjectArgs::default();
     let mut index = 0;
 
     while index < raw_args.len() {
         let text = raw_args[index]
             .to_str()
             .ok_or_else(|| "arguments must be valid UTF-8".to_owned())?;
-        let (flag, inline_value) = text
-            .split_once('=')
-            .map_or((text, None), |(flag, value)| (flag, Some(value)));
-        let home = match flag {
-            "--codex-home" => Some(&mut homes.codex_home),
-            "--claude-home" => Some(&mut homes.claude_home),
-            "--opencode-home" => Some(&mut homes.opencode_home),
-            "--kimi-home" => Some(&mut homes.kimi_home),
-            _ => None,
-        };
-        if let Some(home) = home {
-            let value = match inline_value {
-                Some(value) => value,
-                None => raw_args
-                    .get(index + 1)
-                    .and_then(|value| value.to_str())
-                    .filter(|value| !value.starts_with("--"))
-                    .ok_or_else(|| format!("{flag} requires a UTF-8 path"))?,
-            };
-            *home = Some(value.to_owned());
-            index += if inline_value.is_some() { 1 } else { 2 };
-            continue;
-        }
         match text {
             "--description" => {
                 let value = raw_args
@@ -231,7 +207,7 @@ fn parse_create_project_args(raw_args: &[OsString]) -> Result<CreateProjectArgs,
         title,
         description,
         slug,
-        ..homes
+        ..Default::default()
     })
 }
 
@@ -565,30 +541,23 @@ mod tests {
     }
 
     #[test]
-    fn create_project_args_accept_optional_coder_homes() {
-        let args = parse_create_project_args(&os_args(&[
-            "Homes",
-            "--description",
-            "Per-project configuration",
+    fn create_project_args_reject_legacy_coder_home_flags() {
+        for flag in [
             "--codex-home",
-            "/node/codex",
-            "--claude-home=/node/claude",
+            "--claude-home",
             "--opencode-home",
-            "/node/opencode",
-            "--kimi-home=~/kimi",
-        ]))
-        .unwrap();
-        assert_eq!(args.codex_home.as_deref(), Some("/node/codex"));
-        assert_eq!(args.claude_home.as_deref(), Some("/node/claude"));
-        assert_eq!(args.opencode_home.as_deref(), Some("/node/opencode"));
-        assert_eq!(args.kimi_home.as_deref(), Some("~/kimi"));
-        assert!(parse_create_project_args(&os_args(&[
-            "Homes",
-            "--description",
-            "Test",
-            "--codex-home"
-        ]))
-        .is_err());
+            "--kimi-home",
+        ] {
+            for values in [
+                vec![flag.into(), "/node/home".into()],
+                vec![format!("{flag}=/node/home")],
+            ] {
+                let mut args = os_args(&["Homes", "--description", "Prepared profiles"]);
+                args.extend(values.into_iter().map(OsString::from));
+                let error = parse_create_project_args(&args).expect_err("legacy home flag");
+                assert!(error.contains("unknown argument"), "{flag}: {error}");
+            }
+        }
     }
 
     #[test]
