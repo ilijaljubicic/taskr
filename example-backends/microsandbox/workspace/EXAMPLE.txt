@@ -1,1 +1,0 @@
-This directory is mounted read-write as /workspace by the Microsandbox backend example.

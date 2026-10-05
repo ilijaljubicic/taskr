@@ -1,9 +1,9 @@
 *
 !target/
 !target/release/
-!target/release/mmux
-!mmux.toml
+!target/release/taskr
+!taskr.toml
 !example-sandboxes/
-!example-sandboxes/microsandbox-mmux-node/
-!example-sandboxes/microsandbox-mmux-node/entrypoint.sh
-!example-sandboxes/microsandbox-mmux-node/mmux-node.toml
+!example-sandboxes/microsandbox-taskr-node/
+!example-sandboxes/microsandbox-taskr-node/entrypoint.sh
+!example-sandboxes/microsandbox-taskr-node/taskr-node.toml

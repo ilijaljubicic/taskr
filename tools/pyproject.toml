@@ -1,7 +1,7 @@
 [project]
-name = "mmux-export-project-tasks"
+name = "taskr-export-project-tasks"
 version = "0.1.0"
-description = "Export a project's mmux cards (plans + tasks) into a single self-contained HTML page."
+description = "Export a project's taskr cards (plans + tasks) into a single self-contained HTML page."
 requires-python = ">=3.11"
 dependencies = []  # standard library only (urllib, json)
 

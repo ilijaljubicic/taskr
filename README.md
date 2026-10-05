@@ -1,63 +1,79 @@
-# MCP + tmux = mmux
+# taskr — durable agent orchestration over MCP
 
-mmux is a Rust MCP server for durable agent orchestration and tmux-backed
-terminal control across local or remote execution nodes. It gives operators a
-project -> plan -> task model for coordinating work, attaching coder sessions
-to tasks, recording outcomes and blockers, and pruning finished orchestration
-state. Agents can also inspect sessions, drive interactive shells and coding
-CLIs, read and write files, and route terminal work to sandboxed environments.
+taskr is a Rust MCP server for durable agent orchestration. It gives operators a
+project -> plan -> task model for coordinating coding agents, recording
+outcomes and blockers, gating work behind validations, and pruning finished
+orchestration state.
+
+taskr does not own terminals. Terminal and coding-CLI execution is delegated to
+[Herdr](https://github.com/ilijaljubicic/herdr), an external terminal/agent
+engine. The controller tells Herdr where and how to start an agent, observes
+the result, and drives the agent through MCP tools.
+
+The reusable orchestration library is [taskr-core](crates/taskr-core/README.md).
+It owns domain state and transactional mutations through a storage interface.
+TASKR supplies SQLite persistence, MCP transport and Herdr execution integration.
+Other hosts can embed the core with their own stores and adapters, without a
+Reqvire system model or the TASKR controller. The core supports native and
+`wasm32-unknown-unknown` builds; `make check-core-wasm` checks its public APIs
+for a Workers host. A Cloudflare Durable Object host provides its own
+storage, alarms and execution SDK bindings; that host is not implemented yet.
 
 The core idea is simple:
 
-- `mmux controller` exposes the MCP HTTP endpoint and the controller/node wire
-  endpoint.
-- `mmux node` owns tmux and filesystem access in the environment where it runs.
+- `taskr controller` exposes the MCP HTTP endpoint and owns the durable
+  orchestration store (SQLite).
+- Herdr owns workspaces, tabs, panes, and agent lifecycle on each endpoint.
+  Endpoints are Herdr's `local` session plus any saved machine profiles.
 - Durable orchestration state groups work as projects, Markdown plan briefs,
-  optional plan-wide instructions, and executable tasks with task-owned runtime
-  sessions.
-- mmux can run as one process for local convenience, or as a distributed
-  controller plus one or more node processes. In single-process mode, the
-  controller embeds a node backend and exposes it as the reserved `local` node.
-  In distributed mode, each `mmux node` registers with the controller over the
-  node wire RPC API.
-- Node-aware MCP tools accept a `node` argument. Omitted `node` means `local`.
-  To target a distributed node, pass the node id registered by `mmux node`.
-- Built-in coder profiles describe how to launch and drive CLIs such as
-  `codex`, `opencode`, `kimi`, and `claude`.
+  optional plan-wide instructions, and executable tasks with task-owned
+  executions. Every agent launch is bound to a task: **no task, no execution.**
+- Launch profiles select prepared, versioned native agent environments on an
+  execution endpoint. They carry
+  native agent arguments and non-secret configuration environment only; screen
+  handling, readiness detection, and input strategy belong to Herdr.
+- Agents run in Herdr-owned panes. Controller credentials stay out of worker
+  environments; launch profiles carry configuration, not secrets.
+
+The execution boundary now exposes portable command and endpoint lifecycle ports.
+Native process/SSH transport and a container binding adapter share Herdr command
+construction and parsing. Runtime generations fence saved placement, and
+uncertain allocations remain unresolved rather than authorize duplicate launches.
+See [execution contracts and Cloudflare host requirements](docs/execution-ports.md).
+The container adapter is tested with bindings and compiles for Wasm; a deployed
+Cloudflare host and SDK integration remain separate work.
 
 ## Project Status
 
-mmux is in early development. The project aims to provide a secure control
-plane for terminal automation, especially when paired with sandboxed backends,
-but interfaces, configuration, and backend behavior may still change in
-breaking ways. Security guarantees cannot be made at this stage. Review the
-configuration for your environment and use mmux at your own risk.
+taskr is in early development. The project aims to provide a secure control
+plane for agent orchestration, but interfaces, configuration, and runtime
+behavior may still change in breaking ways. Security guarantees cannot be made
+at this stage. Review the configuration for your environment and use taskr at
+your own risk.
 
 ## Prerequisites
 
 | Dependency | Required for | Notes |
 | ---------- | ------------ | ----- |
-| Node.js and npm | `npx @mmux/mmux` quick start | The npm package downloads and runs the native `mmux` binary for the current platform. |
+| Node.js and npm | `npx @mmux/taskr` quick start | The npm package extracts and runs the bundled native `taskr` binary for the current platform. |
 | Rust and Cargo | Build, test, run | Install with rustup or your system package manager. |
-| tmux | Local and node runtime | `mmux-node` shells out to the system `tmux` binary; `--enable-local-node` fails early if `tmux` is unavailable. |
-| Microsandbox CLI (`msb`) | Microsandbox backend | Required only when running the Microsandbox backend; mmux shells through `msb exec`. |
+| Herdr binary | All terminal/agent execution | taskr shells out to Herdr for every terminal operation (`--herdr-bin`, default `herdr` on `PATH`). Herdr owns its own terminal dependencies. Install: `curl -fsSL https://herdr.dev/install.sh \| sh`. |
 
-Wire source generation is only needed when editing the protobuf schema. The
-generated Rust sources are checked in, so normal builds do not require `buf` or
-the protobuf generators. If you change files under `crates/mmux-wire/proto`,
-run `make wire-generate`, which additionally needs `buf`, `protoc-gen-buffa`,
-`protoc-gen-buffa-packaging`, and the `protoc-gen-connect-rust` generator that
-matches the pinned connect-rust revision in `Cargo.toml`.
+Provisioning, store migration, active-worker cutover, and rollback are
+documented in [docs/deployment.md](docs/deployment.md).
 
 ## Quick Start
 
 ### Run from npm
 
-For a local loopback-only MCP server with the built-in local tmux backend
-(least secure version; run only in trusted environments):
+These commands apply once a Taskr npm release has been published. Until then,
+build and run the renamed source with `make run-local`.
+
+For a local loopback-only MCP server driving the local Herdr session (least
+secure version; run only in trusted environments):
 
 ```bash
-npx --yes @mmux/mmux controller --enable-local-node --allow-remote-without-mcp-token
+npx --yes @mmux/taskr controller --allow-remote-without-mcp-token
 ```
 
 The MCP endpoint is:
@@ -69,197 +85,91 @@ http://127.0.0.1:3000/mcp
 Register that HTTP MCP server with codex:
 
 ```bash
-codex mcp add mmux --url http://127.0.0.1:3000/mcp
+codex mcp add taskr --url http://127.0.0.1:3000/mcp
 ```
 
 Register it with claude code:
 
 ```bash
-claude mcp add --transport http mmux http://127.0.0.1:3000/mcp
+claude mcp add --transport http taskr http://127.0.0.1:3000/mcp
 ```
 
-For authenticated local setup, start mmux with an MCP bearer token and register
+For authenticated local setup, start taskr with an MCP bearer token and register
 the same token with each MCP client:
 
 ```bash
-export MMUX_MCP_TOKEN="$(openssl rand -hex 32)"
-npx --yes @mmux/mmux controller --enable-local-node --mcp-token-env MMUX_MCP_TOKEN
+export TASKR_MCP_TOKEN="$(openssl rand -hex 32)"
+npx --yes @mmux/taskr controller --mcp-token-env TASKR_MCP_TOKEN
 ```
 
-In another shell with `MMUX_MCP_TOKEN` set, register codex:
+In another shell with `TASKR_MCP_TOKEN` set, register codex:
 
 ```bash
-codex mcp add mmux \
+codex mcp add taskr \
   --url http://127.0.0.1:3000/mcp \
-  --bearer-token-env-var MMUX_MCP_TOKEN
+  --bearer-token-env-var TASKR_MCP_TOKEN
 ```
 
 Register claude code by adding the bearer header:
 
 ```bash
-claude mcp add --transport http mmux http://127.0.0.1:3000/mcp \
-  --header "Authorization: Bearer $MMUX_MCP_TOKEN"
+claude mcp add --transport http taskr http://127.0.0.1:3000/mcp \
+  --header "Authorization: Bearer $TASKR_MCP_TOKEN"
 ```
 
-For local Microsandbox mode, prepare the sandbox with `msb` and run the same
-npm package with the embedded Microsandbox node:
-
-```bash
-cd example-backends/microsandbox
-make sandbox-prepare
-cd ../..
-npx --yes @mmux/mmux controller --enable-microsandbox-node --sandbox-name mmux-node --allow-remote-without-mcp-token
-```
+The controller needs at least one launch profile before it can start agents.
+Use [Launch Profiles](#launch-profiles) to discover and sync a native environment
+through the admin MCP tools, then select one prepared launch choice.
 
 ### Install native binary
 
-Install the latest released `mmux` binary:
+Taskr-named native archives will be available with the first Taskr release.
+Until then, build and run the source with `make run-local`.
+
+Install the latest released `taskr` binary:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ilijaljubicic/mmux/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ilijaljubicic/taskr/main/scripts/install.sh | bash
 ```
-
-Linux release archives include one `mmux` binary. On Linux, that binary
-includes the `mmux node --backend microsandbox` connector.
 
 Pin a specific release:
 
 ```bash
-VERSION=v0.1.0 curl -fsSL https://raw.githubusercontent.com/ilijaljubicic/mmux/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ilijaljubicic/taskr/main/scripts/install.sh | VERSION=vX.Y.Z bash
 ```
 
 Then run a local controller:
 
 ```bash
-mmux controller --enable-local-node
+taskr controller
 ```
 
-That is the single-binary local mode: the controller and local tmux backend run
-in one process.
+### Local development
 
-### Local backend
-
-From a repo checkout, the equivalent development command is:
+From a repo checkout, the development command is:
 
 ```bash
 make run-local
 ```
 
-Both commands start the controller with the built-in local node enabled and use
-the built-in coder profiles.
-
-Warning: the local backend is not sandboxed. Tools run tmux commands and file
-operations on the same host as the controller, with the controller process
-user's permissions. Use it only for trusted clients and trusted workspaces.
-When `--enable-local-node` is set, controller startup checks the local tmux
-backend with `tmux -V` and fails early if the system `tmux` binary is
-unavailable. This availability check does not start a temporary tmux server or
-load tmux configuration.
-
-#### Local tmux access
-
-The local backend uses a mmux-owned tmux server socket instead of the user's
-default tmux server. This keeps mmux sessions separate from personal tmux
-sessions. Use an explicit tmux config when you need deterministic local tmux
-server settings.
+### Local MCP access
 
 Default local runtime paths:
 
 ```text
-store path:  ~/.mmux
-tmux socket: deterministic private runtime socket derived from the store path
+store path:  ~/.taskr
+MCP path:    http://127.0.0.1:3000/mcp
 ```
 
-With `--store-path <path>`, mmux uses that path for durable local runtime state
-and derives a short private tmux socket path from it. The socket is intentionally
-not stored under the store path because tmux/Unix socket path limits are short
-on macOS and some CI environments.
-
-By default tmux uses its normal config discovery for that private server. Pass
-`--tmux-config <path>` with `--enable-local-node` to use an explicit local
-backend config file, for example the repo's `tmux.local.conf`:
+With `--store-path <path>`, taskr uses that path for durable state. Pass the
+same path to store-backed CLI commands:
 
 ```bash
-mmux controller --enable-local-node --tmux-config ./tmux.local.conf
+taskr controller --store-path /tmp/taskr-dev
+taskr --store-path /tmp/taskr-dev create-project "Release hardening" --description "..." --slug release-hardening
+taskr --store-path /tmp/taskr-dev list-projects
+taskr --store-path /tmp/taskr-dev prune --dry-run
 ```
-
-User tmux configuration may restore saved sessions when the private server
-starts. Embedded-local controller startup therefore treats the `mmux-*`
-namespace as orchestration-owned: after reconciling durable task-session
-records, it removes every live `mmux-*` session absent from the durable store.
-It performs a short settling sweep to catch asynchronous restore plugins such
-as tmux-continuum. Recorded sessions remain available for continuation, and
-sessions outside the `mmux-*` namespace are never removed by this startup
-cleanup.
-
-For distributed local nodes, pass the same flag to the node process:
-
-```bash
-mmux node --backend local --tmux-config ./tmux.local.conf
-```
-
-`--tmux-config` is only valid for local tmux backends. Microsandbox and other
-remote environments own their tmux config inside the backend image/runtime.
-Restart the local tmux server for config changes to take effect.
-
-Use MCP tools for normal operation:
-
-```text
-list_sessions(project_id)   # project UUID id or slug
-start_coding_session
-coding_send
-coding_read
-kill_session
-```
-
-Use the CLI proxy for manual tmux inspection or interactive attach:
-
-```bash
-mmux create-project "Release hardening" --slug release-hardening
-mmux list-projects
-mmux prune --dry-run
-mmux prune --include-stale-session-records --older-than-days 7
-mmux tmux -- list-sessions
-mmux tmux -- list-sessions --project <project-id-or-slug>
-mmux tmux -- capture-pane -t codex -p
-mmux tmux -- send-keys -t codex C-c
-mmux attach --read-only codex
-mmux attach codex
-```
-
-For a custom store path, pass the same path to both the controller and the
-proxy:
-
-```bash
-mmux controller --enable-local-node --store-path /tmp/mmux-dev
-mmux --store-path /tmp/mmux-dev create-project "Release hardening" --slug release-hardening
-mmux --store-path /tmp/mmux-dev list-projects
-mmux --store-path /tmp/mmux-dev prune --dry-run
-mmux --store-path /tmp/mmux-dev tmux -- list-sessions
-mmux --store-path /tmp/mmux-dev attach --read-only codex
-mmux --store-path /tmp/mmux-dev attach codex
-```
-
-Plain `tmux` talks to your user's default tmux server and will not show mmux
-local-node sessions. Use `mmux tmux -- ...` when inspecting mmux local sessions.
-For orchestration work, project ids are UUIDs and project slugs are globally
-unique aliases. MCP tools that accept `project_id` accept either the UUID id or
-the slug. `list_sessions` requires `project_id` and returns durable sessions
-recorded against tasks in that project. Use `admin_list_node_sessions` only for
-raw node/tmux debugging. At the CLI layer,
-`mmux tmux -- list-sessions --project <project-id-or-slug>` provides a similar
-local-node filter for manual inspection.
-
-Local node environment is managed outside task orchestration. Start mmux from a
-shell, service, or container that already has the env needed by coder CLIs. If
-the private tmux server does not exist yet, it inherits env from the mmux
-process when the first local session starts.
-For Codex specifically, mmux does not set a separate `CODEX_HOME`; local-node
-Codex sessions use the `CODEX_HOME` inherited by the controller or node
-process. If `CODEX_HOME` is unset, Codex uses its own default home, typically
-`~/.codex`. To isolate mmux Codex state, start the controller or local node with
-an explicit value, for example
-`CODEX_HOME=/path/to/mmux-codex-home mmux controller --enable-local-node`.
 
 If you are calling the MCP endpoint directly, include both accepted response
 types:
@@ -273,118 +183,52 @@ curl -X POST "http://<controller-host>:3000/mcp" \
 
 Raw MCP clients must check for JSON-RPC `error` and tool-level `isError`
 before parsing a response as a successful tool result. Tool failures are clear
-but still returned in the MCP response envelope. For example, a task-aware
-`start_coding_session` without `node` returns a missing-field error;
-client wrappers
-should surface that error instead of parsing the missing success payload.
-
-### Microsandbox backend
-
-For local development with an existing Microsandbox, mmux can also run in
-single-binary mode:
-
-```bash
-cd example-backends/microsandbox
-make sandbox-prepare
-cd ../..
-mmux controller --enable-microsandbox-node --sandbox-name mmux-node
-```
-
-This embeds a host-side Microsandbox connector in the controller process and
-exposes it as node `local`. The connector verifies the sandbox by running
-`msb exec <name> -- bash -lc true` during startup. mmux still does not create
-or own Microsandbox lifecycle; `msb` owns create, start, stop, snapshot,
-import, and export.
-
-Embedded modes do not need a node wire token for the embedded node. Configure
-`--wire-token`, `--wire-mtls`, or `--allow-unauthenticated-node-wire` only when
-you also want distributed `mmux node` processes to register with the same
-controller.
-
-Distributed mode keeps controller and node separate:
-
-Start a controller that remote nodes can reach:
-
-```bash
-export MMUX_MCP_TOKEN=<mcp-token>
-export MMUX_WIRE_TOKEN=<wire-token>
-make run-controller CONTROLLER_ARGS="--host <bind-host> --port 3000 --mcp-token $MMUX_MCP_TOKEN --wire-token $MMUX_WIRE_TOKEN"
-```
-
-In another shell, use `msb` to create or start the sandbox, then run the
-host-side node connector:
-
-```bash
-cd example-backends/microsandbox
-export MMUX_WIRE_TOKEN=<same-wire-token>
-make launch
-```
-
-The Microsandbox example uses `http://127.0.0.1:3000` by default because the
-node connector runs on the host and attaches to an existing sandbox by name.
-Override `CONTROLLER_URL` only when the controller runs elsewhere. mmux does not
-provide a Microsandbox lifecycle command; use `msb` directly for create, start,
-stop, snapshot, import, and export.
+but still returned in the MCP response envelope.
 
 ## CLI Entrypoints
 
 | Command | Purpose |
 | ------- | ------- |
-| `mmux controller` | Runs the MCP control plane and node registry. |
-| `mmux node` | Registers to a controller and executes node-side tmux/file commands. |
-| `mmux create-project <title> --description <text>` | Creates a durable orchestration project in the local mmux store. Supports optional `--slug <slug>` and per-profile `--codex-home`, `--claude-home`, `--opencode-home`, `--kimi-home` paths. |
-| `mmux delete-project <id-or-slug>` | Deletes a durable orchestration project from the local mmux store, including all contained plans, task cards, task sessions, and task edges. |
-| `mmux list-projects` | Lists durable orchestration projects from the local mmux store so project ids/slugs are discoverable. |
-| `mmux prune` | Prunes orchestration-owned live sessions, stale durable task sessions, and finished plans. Defaults to dry-run, all categories included, and `--older-than-days 14`; pass `--execute` to mutate state. |
-| `mmux tmux -- <args>` | Runs `tmux` against mmux's private local-node tmux socket. `list-sessions` accepts mmux's `--project <project-id-or-slug>` filter. |
-| `mmux attach [--read-only|-r] <session>` | Attaches to a session in mmux's private local-node tmux server. Use read-only mode for inspection without sending input. |
+| `taskr controller` | Runs the MCP control plane. Every terminal operation is delegated to Herdr. |
+| `taskr create-project <title> --description <text>` | Creates a durable orchestration project in the local taskr store. Supports optional `--slug <slug>` and per-agent `--codex-home`, `--claude-home`, `--opencode-home`, `--kimi-home` paths. |
+| `taskr delete-project <id-or-slug>` | Deletes a durable orchestration project from the local taskr store, including all contained plans, task cards, and task edges. |
+| `taskr list-projects` | Lists durable orchestration projects from the local taskr store so project ids/slugs are discoverable. |
+| `taskr prune` | Removes old retained worker terminals, stale execution records, and finished plans after observing Herdr endpoints. Defaults to dry-run, all categories included, and `--older-than-days 14`; pass `--execute` to apply cleanup. |
 
-`src/main.rs` dispatches to root help when no arguments are provided. Use
-`mmux controller` to start the controller explicitly, or pass controller flags
-directly such as `mmux --enable-local-node`.
+`src/main.rs` dispatches to the controller when no subcommand matches, so
+`taskr --herdr-bin herdr` is equivalent to `taskr controller --herdr-bin herdr`.
 
 Important controller flags:
 
 | Flag | Default | Purpose |
 | ---- | ------- | ------- |
-| `--host` | loopback interface | Bind host for the HTTP server. |
+| `--host` | `127.0.0.1` | Bind host for the MCP HTTP server. |
 | `--port` | `3000` | Bind port. |
-| `--mcp-token` | `MMUX_MCP_TOKEN` | Bearer token for public MCP requests. |
-| `--mcp-token-file` | none | Reads the MCP bearer token from a file. |
-| `--mcp-token-env` | `MMUX_MCP_TOKEN` | Env var used when MCP token flags are omitted. |
-| `--allow-remote-without-mcp-token` | false | Allows MCP without bearer auth and ignores `MMUX_MCP_TOKEN`; mutually exclusive with explicit MCP token flags. |
-| `--wire-token` | `MMUX_WIRE_TOKEN` | Bearer token for node wire RPC requests. |
-| `--wire-mtls` | false | Enables native TLS termination and requires mTLS node identity for wire RPC; mutually exclusive with explicit wire token flags. |
-| `--tls-cert` | none | PEM server certificate chain used when `--wire-mtls` is set. |
-| `--tls-key` | none | PEM server private key used when `--wire-mtls` is set. |
-| `--wire-client-ca` | none | PEM CA certificate(s) used to verify node client certificates. |
-| `--wire-token-file` | none | Reads the node wire bearer token from a file. |
-| `--wire-token-env` | `MMUX_WIRE_TOKEN` | Env var used when wire token flags are omitted. |
-| `--allow-unauthenticated-node-wire` | false | Allows node wire RPC without bearer auth and ignores `MMUX_WIRE_TOKEN`; mutually exclusive with explicit wire token flags. |
-| `--store-path` | `~/.mmux` | Local runtime state directory. The embedded local tmux socket is a deterministic short runtime path derived from this store path. |
-| `--tmux-config` | tmux default discovery | Local tmux config file for `--enable-local-node`; invalid without the embedded local node. |
-| `--enabled-coder-profiles` | all built-ins | Comma-separated MCP coder profile allowlist, for example `codex,claude`. |
-| `--default-coder-profile` | first enabled built-in in canonical order | Default coder profile used when profile-aware tools omit `profile`. Must be enabled. |
-| `--enable-local-node` | false | Starts the built-in local tmux node in-process. |
-| `--enable-microsandbox-node` | false | Attaches an embedded Microsandbox node in-process. Requires `--sandbox-name` for an existing running sandbox. |
-| `--sandbox-name` | none | Existing running Microsandbox sandbox name used with `--enable-microsandbox-node`. |
+| `--mcp-token` | `TASKR_MCP_TOKEN` | Bearer token for MCP requests. |
+| `--mcp-token-file` | none | Reads the MCP bearer token from a file. Prefer `/run/secrets` paths in containers. |
+| `--mcp-token-env` | `TASKR_MCP_TOKEN` | Env var used when MCP token flags are omitted. |
+| `--allow-remote-without-mcp-token` | false | Allows MCP without bearer auth and ignores `TASKR_MCP_TOKEN`; mutually exclusive with explicit MCP token flags. |
+| `--store-path` | `~/.taskr` | Directory for durable state (`taskr.db`). |
+| `--enable-admin-tools` | false | Enables admin-only MCP tools that create or change project boundaries. |
+| `--herdr-bin` | `herdr` | Herdr executable used for every terminal operation. |
+| `--herdr-session` | none | Explicit local Herdr session selection. Never affects saved-machine endpoints. |
+| `--environment-python-bin` | `python3` | Python 3.11+ for local environment discovery/preparation. |
+| `--environment-ssh-bin` | `ssh` | OpenSSH client for environment sync to saved Herdr machines. |
+| `--max-timeout-seconds` | `120` | Maximum wait timeout accepted by wait tools. |
+| `--max-request-bytes` | `2097152` | Maximum MCP HTTP request body size. |
+| `--max-capture-bytes` | `2097152` | Maximum bytes returned by terminal capture tools. |
 
-Important node flags:
+Prune flags:
 
 | Flag | Default | Purpose |
 | ---- | ------- | ------- |
-| `--backend` | `local` | Execution backend: `local` or `microsandbox`. |
-| `--sandbox-name` | none | Existing running Microsandbox sandbox name used with `--backend microsandbox`. |
-| `--node-id` | `local` | Node identifier advertised to the controller. |
-| `--controller-url` | none | Controller URL to register with. |
-| `--node-name` | generated | Human-readable node name. |
-| `--wire-token` | `MMUX_WIRE_TOKEN` env fallback | Bearer token for controller wire endpoints. |
-| `--controller-ca` | public WebPKI roots | PEM CA certificate(s) used to verify the HTTPS controller. |
-| `--client-cert` | none | PEM certificate chain to present for node wire mTLS. |
-| `--client-key` | none | PEM private key to present for node wire mTLS. |
-| `--poll-interval-ms` | `500` | Command polling interval. |
-| `--store-path` | `~/.mmux` | Local backend runtime state directory. The local tmux socket is a deterministic short runtime path derived from this store path. |
-| `--tmux-config` | tmux default discovery | Local tmux config file for `--backend local`; invalid with `--backend microsandbox`. |
+| `--dry-run` | default | Preview what would be pruned without mutating state. |
+| `--execute` | false | Apply the prune. |
+| `--older-than-days` | `14` | Age cutoff for stale execution records and finished plans. |
+| `--include-stale-execution-records` | false | Scope the run to stale durable execution records only. |
+| `--include-finished-plans` | false | Scope the run to finished plans only. |
+| `--herdr-bin` | `herdr` | Herdr executable used to observe live endpoints. |
+| `--herdr-session` | none | Explicit local Herdr session selection. |
 
 ## Make Targets
 
@@ -395,18 +239,12 @@ make test
 make lint
 make release
 make run-local
-make run-controller
-make run-node
-make wire-check-tools
-make wire-generate
 ```
 
-Pass entrypoint flags through the target variables:
+Pass entrypoint flags through the target variable:
 
 ```bash
-make run-local LOCAL_ARGS="--port 3001"
-make run-controller CONTROLLER_ARGS="--mcp-token $MMUX_MCP_TOKEN --wire-token $MMUX_WIRE_TOKEN"
-make run-node NODE_ARGS="--controller-url http://<controller-host>:3000 --wire-token $MMUX_WIRE_TOKEN"
+make run-local LOCAL_ARGS="--port 3001 --enable-admin-tools"
 ```
 
 Release publishing uses git tags. The release version comes from
@@ -418,287 +256,362 @@ with `version.workspace = true`. Bump that version with `make update-patch`,
 used by `scripts/install.sh`, then publish the npm package with all supported
 platform archives.
 
+### Configure npm publishing
+
+The npm package is `@mmux/taskr`; its command is `taskr`. The `@mmux` npm scope
+is independent of the GitHub repository name, `ilijaljubicic/taskr`. The old
+`@mmux/mmux` package and its trusted-publisher connection are separate.
+
+For a new package, npm requires an initial publication before configuring a
+trusted publisher. From a reviewed checkout, build the local package and log
+in with an npm account that can publish to `@mmux`:
+
+```bash
+make npm-package
+cd npm/taskr
+npm pack --dry-run
+npm login --registry https://registry.npmjs.org
+npm whoami --registry https://registry.npmjs.org
+npm publish --access public --tag bootstrap
+```
+
+Confirm that `npm whoami` succeeds and reports an account allowed to create
+packages in `@mmux`. A user-owned scope requires that user's account; an
+organization scope requires the appropriate organization access. Access to an
+existing package does not grant creation rights in another user's scope. If
+`npm whoami` returns 401, renew the CLI login before retrying the publish.
+[npm scope ownership](https://docs.npmjs.com/about-scopes/)
+
+This first publication contains the current platform's binary and uses the
+`bootstrap` tag. Use the release workflow for the first all-platform `latest`
+version. A published version cannot be reused: if the bootstrap version is
+`0.4.0`, the subsequent release must use a new version, such as `0.5.0`.
+[npm package trust prerequisites](https://docs.npmjs.com/cli/v11/commands/npm-trust/)
+
+Open `@mmux/taskr` on npm, select Settings → Trusted Publisher → GitHub Actions,
+and configure:
+
+| Field | Value |
+| --- | --- |
+| Organization or user | `ilijaljubicic` |
+| Repository | `taskr` |
+| Workflow filename | `release.yml` |
+| Environment name | Leave empty; the release job has no GitHub environment. |
+| Allowed actions | Enable direct publishing with `npm publish`. |
+
+The release workflow uses Node.js 24 and `id-token: write` for OIDC, without an
+npm publishing token. The publisher must match the repository and workflow
+exactly. Commit/merge the package changes and version bump to `main`, then use
+`make release-tag` from a clean `main` checkout. The workflow builds Linux and
+both macOS binaries and publishes the complete package.
+[npm trusted publishing](https://docs.npmjs.com/trusted-publishers/)
+
 ### Inspect the npm package locally
 
-The `npm/mmux` package provides an `npx`/`yarn dlx` wrapper around the native
-`mmux` binary. To inspect the package from this workstation:
+The `npm/taskr` package provides an `npx`/`yarn dlx` wrapper around the native
+`taskr` binary. To inspect the package from this workstation:
 
 ```bash
 make npm-pack-dry-run
 ```
 
 `make npm-package` builds the current platform, writes
-`npm/mmux/artifacts/mmux-<platform>.tar.gz`, and syncs the npm package version
+`npm/taskr/artifacts/taskr-<platform>.tar.gz`, and syncs the npm package version
 from `[workspace.package].version`. The local package only contains the current
 platform archive; public npm publishing is done by the GitHub release workflow
 so the package contains all supported platform archives.
 
 `make npm-pack` creates a `.tgz` without publishing. Set `NPM_CACHE=/path/to/cache`
-if npm should use a cache directory other than `/tmp/mmux-npm-cache`.
+if npm should use a cache directory other than `/tmp/taskr-npm-cache`.
 
 The published package can be run with:
 
 ```bash
-npx @mmux/mmux controller --enable-local-node
-npx @mmux/mmux controller --enable-microsandbox-node --sandbox-name mmux-node
-yarn dlx @mmux/mmux controller --enable-local-node
-yarn dlx @mmux/mmux controller --enable-microsandbox-node --sandbox-name mmux-node
+npx @mmux/taskr controller
+yarn dlx @mmux/taskr controller
 ```
 
-## Node Wire Authentication
+## Launch Profiles
 
-Node wire RPC supports separate auth from the public MCP endpoint. Bearer token
-auth requires every node request to present the configured shared secret.
+Launch choices come from prepared native environments stored in `taskr.db`.
+No controller `profiles.json` is needed. Herdr's live agent list reports running
+processes; it does not discover configuration homes or native profiles.
 
-```bash
-mmux controller --wire-token "$MMUX_WIRE_TOKEN"
-mmux node --controller-url https://<controller-host>:3000 --wire-token "$MMUX_WIRE_TOKEN"
-```
+Start the controller with `--enable-admin-tools` for setup. Python 3.11+ must be
+installed on both ends, and the native coding CLI on the selected endpoint.
+Installed-home discovery also needs the controller's CLI; imports may declare
+their source CLI version in the manifest.
+Remote setup also needs OpenSSH and a saved, enabled Herdr machine. The embedded
+companion runs over that machine's saved SSH target; no daemon or companion
+installation is required. It prepares files; Herdr remains the agent executor.
 
-The controller resolves a single node wire auth policy at startup: bearer token,
-mTLS identity, or explicit `unauthenticated` development mode. Mixed
-configuration is rejected when conflicting modes are explicit. If `--wire-mtls`
-is set, explicit wire token flags/files must not also be set; the default
-`MMUX_WIRE_TOKEN` env fallback is ignored. If
-`--allow-unauthenticated-node-wire` is set, `MMUX_WIRE_TOKEN` is also ignored.
-If no wire auth is configured, a distributed-only controller refuses to start
-unless `--allow-unauthenticated-node-wire` is explicit. An embedded-node
-controller can start without node wire credentials; in that case the embedded
-node is usable as `local`, while unauthenticated distributed node wire requests
-are rejected.
+1. Call `admin_environment_discover` with `{}` to search local `.codex*` and
+   `.claude*` homes (including nested `.claude` directories), or pass
+   `homes: ["/home/user/.codex-work"]`. To import a native home or collection,
+   use `source_path: "/path/to/environments"` or
+   `source_path: "/path/to/environments.zip"` instead. Read the returned environment IDs,
+   revisions, native profile names, and discovery issues.
+2. Pick an `endpoint_id` from `list_endpoints`.
+3. Call `admin_environment_sync` with the selected `source_environment_id`,
+   `source_revision`, `endpoint_id`, and explicit `credential_policy`.
+4. Poll `admin_environment_sync_status` using the returned `sync_job_id`.
+   `queued` and `preparing` are in progress; `ready` returns prepared
+   `launch_profile_ids`; `failed` reports setup errors. Cancel unfinished jobs
+   with `admin_environment_sync_cancel`.
+5. Call `list_launch_profiles({"endpoint_id":"local"})` (or the remote ID)
+   and select a returned ID for `start_coding_session` or a task `run_spec`.
 
-mTLS is the zero-trust node identity mode. A verified mTLS identity is
-normalized to a node id before it reaches the registry, and the controller
-rejects requests where that identity tries to act as a different `node_id`.
-This is intentionally runtime-neutral: the native runtime or a future
-Cloudflare Worker/Durable Object runtime can perform certificate verification
-and pass the verified identity into the same core policy.
+Folder/ZIP imports use the same sync tools and endpoint selection. Each detected
+home retains its native profiles and supplied skills/configuration. Imported
+sources do not inherit the controller user's skills or external files. An
+optional `taskr-environments.json` manifest names environments and maps paths
+from the original machine. ZIPs are extracted into a private, versioned cache
+beside `taskr.db`; they can wrap the collection in one directory. Discovery
+returns provenance and metadata. Source or archive changes require rediscovery;
+prepared deployments retain their original settings. See
+[folder and ZIP import format](docs/environment-imports.md) for examples,
+path rules, limits, and cache retention.
 
-Native local runtime mTLS uses controller-side TLS termination:
-
-```bash
-mmux controller \
-  --wire-mtls \
-  --tls-cert ./certs/controller.pem \
-  --tls-key ./certs/controller-key.pem \
-  --wire-client-ca ./certs/node-ca.pem
-```
-
-The node can present a client certificate when calling an HTTPS controller:
-
-```bash
-mmux node \
-  --controller-url https://<controller-host>:3000 \
-  --node-id msb-1 \
-  --controller-ca ./controller-ca.pem \
-  --client-cert ./node.pem \
-  --client-key ./node-key.pem
-```
-
-The native runtime requires node identity in URI SAN `mmux:node:<node-id>` or
-`spiffe://mmux/node/<node-id>`. DNS SAN and CN are ignored for node identity.
-Use `--controller-ca` when the controller uses a private or self-signed CA.
-See `MTSL.md` for OpenSSL commands.
-
-## Coder Profiles
-
-Coder profiles are built into mmux as canonical Rust adapters. Supported
-profiles are:
-
-- `codex`
-- `opencode`
-- `kimi`
-- `claude`
-
-Each built-in profile owns its launch command, prompt submission mode,
-readiness markers, startup/update handling, blocking-confirmation detection,
-compact-read filtering, and approve/reject/cancel/escape keys. Use
-`list_coder_profiles` to inspect the public metadata for the enabled built-ins.
-By default every built-in profile is enabled; pass `--enabled-coder-profiles`
-with a comma-separated list such as `codex,claude` to expose only that subset
-through MCP profile listing, profile resources, and profile-aware tools. When a
-profile-aware tool omits `profile`, mmux uses `--default-coder-profile` if set,
-otherwise the first enabled built-in profile in canonical order: `codex`,
-`opencode`, `kimi`, then `claude`.
-
-Prompt submission is profile-aware. codex, kimi, and opencode sessions use tmux
-paste buffers by default. claude uses literal key input followed by a real
-Enter keypress because its Ink-based text box handles pasted newlines
-differently from actual keypresses.
-
-`permission_bypass_cmd` is only used when `start_coding_session` receives
-`bypass_permissions = true`. Normal sessions always use the profile's normal
-command. Built-in profiles define permission bypass only for CLIs whose local
-help exposes a clear bypass flag.
-
-## Sessions
-
-mmux works with tmux sessions. A session name identifies a running terminal on
-one node. Node-aware tools accept `node`; if omitted, they target `local`.
-
-There are two common session patterns:
-
-| Session type | Created by | Used with | Meaning |
-| ------------ | ---------- | --------- | ------- |
-| Shell session | Manually created and attached to a task with `session_record` | `send_input`, `send_key`, `capture_output`, `wait_start`, `wait_status`, `wait_cancel`, `session_info`, `list_panes`, `resize_pane` | Generic terminal session with no profile-specific readiness rules. |
-| Coder session | `start_coding_session` | `coding_task_send` for initial task delegation, `coding_send` for follow-ups, `wait_start` with `kind = "coding-ready"`, `wait_status`, `coding_read`, `coding_action`, `check_state` | A tmux session running a coding CLI and interpreted through a coder profile. |
-
-A coder session is not a separate storage object. It is identified by:
-
-- `node`: where the tmux session lives;
-- `session`: the tmux session name;
-- `profile`: the CLI interaction rules used to launch/read/drive it.
-
-Example:
+Example sync using login already provisioned on the destination:
 
 ```json
 {
-  "node": "msb-mmux-1",
-  "session": "codex-main",
-  "profile": "codex"
+  "source_environment_id": "<discovered environment ID>",
+  "source_revision": "<discovered revision>",
+  "endpoint_id": "local",
+  "credential_policy": "endpoint",
+  "endpoint_auth_home": "/home/user/.codex"
 }
 ```
 
-The same tmux session can be inspected with generic session tools, but coding
-tools need the profile so mmux can detect prompts, busy states, startup/update
-prompts, and approval actions correctly.
+`credential_policy="endpoint"` excludes source login files and rejects recognized
+embedded credentials in configuration. It copies the selected destination's
+native login file into the managed home. `credential_policy="copy"` explicitly
+permits transferring source login files and embedded configuration credentials.
+There is no implicit credential transfer. OS keychains and provider/MCP OAuth
+stores are not cloned. Provider access is not probed by sync; readiness confirms
+files/dependencies, not that a provider will accept the login. Review source
+configuration and provision target service credentials when needed.
 
-`start_coding_session` requires an existing `task_id` for every launch or
-adoption. **No task, no session.** Missing, null, empty, malformed, or unknown
-task IDs are rejected before mmux contacts the execution node. The task's plan
-identifies its project; a workspace directory alone never selects a project.
+Native `hooks.json` commands and their explicit script dependencies are included
+and checked. Codex may request hook review after paths change during cloning.
+Its `hooks.state` trust metadata can change without invalidating resume; launch
+settings, hook commands and bundled scripts remain pinned.
 
-Provide explicit `node`, `profile`, `workspace_path`, `bypass_permissions`,
-`role`, and `kind`. `skills` defaults to an empty list. Use either `session`
-or `generate_session_name = true`. The returned `session_record` is always
-attached to the task. Start readiness tracking with `wait_start` using
-`kind = "coding-ready"`; launching does not wait for readiness.
+`dry_run=true` validates preparation without publishing a home or launch choice.
+`refresh=true` re-exports an already-ready selection, for credential rotation or
+repair. Identical content reuses its deployment; changed content/credentials
+create a new one. `deployment_root` optionally selects an absolute or `~/` managed
+root on the endpoint; its default is `~/.local/share/taskr/environments`.
 
-`exec` only executes commands in an existing live session attached to a task.
-It requires `session` and `command`, never creates a session, and does not
-accept `workspace_path`. Use `start_coding_session` with a valid task to launch
-a coder. `session_record` also requires a valid task when adopting a manually
-started session.
+Discovery currently supports Codex homes with `config.toml` and Claude homes
+with `settings.json`. Codex requires 0.134.0+ and the advertised `--profile`, `--no-daemon`, and
+`--no-alt-screen` capabilities; native `*.config.toml` profiles
+remain native and yield a base choice plus one choice per profile. Legacy inline
+Codex profile tables require native migration first. The destination CLI must
+be at least as new as the source. Claude currently yields its base settings
+choice; Claude plugin installations are reported as unsupported rather than
+silently omitted. OpenCode/Kimi environment adapters are not implemented yet;
+already-running agents can still be adopted through MCP.
 
-Generated orchestration-owned names use the `mmux-*` prefix and include the
-task slug, session kind, and a short suffix; non-`mmux-*` sessions are never
-treated as orchestration-owned cleanup targets.
+Bundles include native configuration, profile files, instructions, rules,
+commands, agents, skills, declared file dependencies, and configured Codex plugin
+installations. External Codex user skills are materialized under the deployed
+home's supported `skills` directory. Repository skills stay with the repository.
+Native sessions/history/logs and general home caches are excluded. Bundles are
+limited to 64 MiB and 10,000 files; file symlinks are materialized, cycles and
+special files are rejected. Missing MCP/hook executables, source-only localhost
+services on remote sync, and unsupported state-path settings fail preparation.
+Executables and whole remote servers are provisioned separately.
 
-`workspace_path` is the backend-owned workspace/start directory. The controller
-stores and passes the selected string for the chosen node/backend without
-canonicalizing it against the controller host filesystem. The backend that
-launches tmux owns interpreting, validating, or failing the path in its own
-environment. Reconciliation does not compare a live session's current working
-directory to `TaskSession.workspace_path`; the recorded path is the session's
-startup/adoption placement, and the session may change directories during work.
-Task scope is separate from runtime placement: `include_paths` and
-`exclude_paths` define the task work boundaries. Relative scope paths are
-interpreted from the runtime workspace when a `run_spec` or recorded session
-provides one. Prefer scope paths inside that workspace unless the operator
-intentionally scopes external files.
+Managed homes publish atomically after validation, with private file permissions.
+The SQLite registry stores metadata only; bundles and credentials travel through
+companion stdin, never launch arguments or TASKR snapshots. Interrupted jobs are
+reconciled after restart. Cancellation prevents publishing a launch selection;
+an already-transferred deployment can remain for later reconciliation.
 
-## Per-project coder homes
+Normal launch verifies the selected deployment before allocating a pane. It
+passes `CODEX_HOME` or `CLAUDE_CONFIG_DIR`, native profile arguments, and the
+explicit permission policy to Herdr. Codex uses `--no-daemon --no-alt-screen`.
+The process `HOME` is unchanged. Model, provider, permissions, hooks, skills, and
+MCP settings are loaded by the native CLI from that deployed configuration and
+its normal repository/managed layers. Sync does not grant permission bypass.
 
-Projects can store an optional configuration home for each supported profile:
+Choices are endpoint-specific and immutable: newer syncs retain previous IDs,
+homes, and conversations. Executions pin the deployment through their selected
+profile ID and frozen home/arguments. Resume uses that original home. Task exit
+and ordinary prune never delete native conversations or deployed environments.
+An empty endpoint catalog requires admin setup; there is no global-profile or
+local-endpoint fallback. An explicit profile is required when several choices
+exist; required MCP fields remain required.
 
-| Project field / MCP argument | `create-project` flag | CLI environment variable |
-| --- | --- | --- |
-| `codex_home` | `--codex-home` | `CODEX_HOME` |
-| `claude_home` | `--claude-home` | `CLAUDE_CONFIG_DIR` |
-| `opencode_home` | `--opencode-home` | `OPENCODE_CONFIG_DIR` |
-| `kimi_home` | `--kimi-home` | `KIMI_CODE_HOME` |
+The old `--launch-profiles-file`, `--enabled-launch-profiles`, and
+`--default-launch-profile` flags are rejected. For existing stores, sync the
+native home, clear conflicting project home overrides with `project_update`,
+and explicitly update future task `run_spec.launch_profile_id` values with
+`task_update`. Stored old preset IDs are not automatically remapped or historical
+conversations relocated; pre-cutover sessions remain available in their original
+native homes for direct native resume through Herdr.
 
-All four fields default to `null`. Omitting them, or supplying `null` to MCP
-`project_create`, makes mmux pass **no home override** for that CLI. The CLI
-uses its inherited environment or its own default home. Projects already in
-an existing store behave the same way until a home is explicitly configured.
+## Per-project agent homes
 
-Use absolute paths on the execution node, or `~/...` to resolve against that
-node's home. mmux stores these paths without checking or canonicalizing them
-on the controller. Provision the directory and the CLI configuration or login
-on the node before use; mmux does not copy credentials or configuration.
-
-```bash
-mmux create-project example --description "Example project" \
-  --codex-home /home/user/.codex-example \
-  --claude-home /home/user/.claude-example
-```
-
-MCP `project_create` accepts the same optional fields. To update an existing
-project through a running controller with `--enable-admin-tools`, call:
+Projects retain optional `codex_home`, `claude_home`, `opencode_home`, and
+`kimi_home` metadata for existing stores and the retained project CLI. With a
+prepared environment, a configured project home must exactly match its resolved
+deployment home; a conflict is rejected. Normally leave these fields `null` and
+let the prepared launch choice supply the home. `project_update` (admin) clears
+an override with explicit `null`; omission preserves its value. Existing
+executions keep their frozen environment.
 
 ```json
-{
-  "name": "project_update",
-  "arguments": {
-    "project_id": "example",
-    "codex_home": "/home/user/.codex-example",
-    "claude_home": "/home/user/.claude-example"
-  }
-}
+{"project_id":"example", "codex_home":null, "claude_home":null}
 ```
 
-`project_id` accepts the UUID or slug. An omitted update field keeps its current
-value; an explicit `null` clears that override. `project_list` and
-`orchestration_status` include the current homes. Updates are persisted and take
-effect in the running controller immediately: **no controller restart is
-needed** for subsequent launches.
+The endpoint owns the home path. TASKR does not reinterpret it on the controller
+filesystem. The process `HOME` and task `workspace_path` remain separate from the
+CLI configuration home.
 
-`start_coding_session`, `task_start`, `orchestration_next`, and
-recovery of missing recorded sessions resolve the home from the task's project
-at launch time. Only the matching profile's variable is supplied, scoped to
-that CLI process. Existing or adopted live sessions keep their launch
-environment; a home change does not restart them. Starts without a valid
-`task_id` are rejected. A task whose project has no home override uses the
-CLI's inherited/default home.
+## Executions
 
-These variables follow each CLI's own semantics:
-[Codex](https://developers.openai.com/codex/config-advanced/),
-[Claude](https://code.claude.com/docs/en/env-vars), and
-[Kimi Code](https://moonshotai.github.io/kimi-code/en/configuration/data-locations.html)
-use them for configuration and local state.
-[OpenCode](https://opencode.ai/docs/config/#custom-directory) loads the custom
-configuration directory in addition to its other configuration sources; this
-field does not relocate all OpenCode state. The process `HOME` is unchanged.
-Model selection remains in each CLI's configuration. For example, to make
-Astra the Codex default, set `model = "gpt-6-astra"` in the selected home's
-`config.toml`.
+Every agent launch is a durable **task execution**: a binding between one
+task, one Herdr endpoint, one launch profile, one workspace path, and the
+Herdr-owned runtime facts (workspace id, tab id, pane id, agent name, agent
+session). Executions are recorded in the SQLite store and survive controller
+restarts.
+
+- Endpoints are `local` (Herdr's local session) or a saved Herdr machine
+  profile id. `--herdr-session` selects an explicit local Herdr session but
+  never affects saved-machine endpoints.
+- Launches are task-owned. `start_coding_session` requires an existing
+  `task_id`; missing, malformed, or unknown task ids are rejected before taskr
+  contacts Herdr. **No task, no execution.**
+- Execution phases: `Pending` (launch intent persisted), `Allocating`
+  (workspace/tab/pane allocation submitted), `Starting` (agent start
+  submitted), `Live` (agent recognized on the endpoint), `Unavailable`
+  (endpoint unreachable; the binding is kept), `Exited` (agent or pane gone),
+  `Stopped` (stopped deliberately through TASKR-owned cleanup), and `Failed`
+  (a launch failed with an observed error).
+- Recovery states: `NeedsReconciliation` (default after a restart or gap),
+  `Reconciled` (live facts confirmed), `OccupantMismatch` (the bound pane is
+  live but occupied by a different agent; adopt it with `execution_adopt` or
+  stop the record), `Abandoned` (deliberately given up). A surviving pane with
+  no registered agent is proven-exited, not confirmed. Reconcile by observing
+  the endpoint with `list_executions`, adopting the real pane/agent with
+  `execution_adopt`, or stopping the record with `execution_stop`.
+- `execution_stop` saves the report and native conversation reference, exits
+  the coding agent, and closes its verified pane.
+
+TASKR allocates one Herdr **space per plan and endpoint**. Tabs are created on
+demand from the launch template; `start_coding_session.template` overrides the
+stored run template, which otherwise defaults to `task`.
+
+| Launch template | Tab group |
+| --- | --- |
+| `task` | Work |
+| `validate` | Validation |
+| `review` | Review |
+| `quality-guard` | Quality |
+
+Each execution gets a fresh pane with its own cwd and environment. A tab holds
+at most two TASKR agent panes; further concurrent agents open `Work 2`, etc.
+Roles and descriptive kinds do not select tabs. The group is frozen at launch;
+later prompts do not move the pane. Spaces show `plan-N · Plan title`, and panes
+show `task-N · Task title`. Persisted IDs establish ownership, so renaming a
+label does not change routing. TASKR preserves user-added panes.
+
+New Codex conversations receive the title `task-N · Task title · exec-ID`.
+TASKR saves the native conversation ID, original launch arguments, configuration
+environment, home, cwd, group, and report. `task_get.execution_history` exposes
+previous attempts after replacement. Titles help discovery; the native ID
+selects the exact conversation when resuming.
+
+Inspect a live worker directly in Herdr by selecting the plan's space, group
+tab, and task pane. To reopen a saved conversation after its pane has closed,
+call MCP `execution_resume` with:
+
+```json
+{"execution_id":"<closed-execution-id>"}
+```
+
+Resume creates a fresh pane in Herdr. Select its plan space and group tab to
+inspect it. Herdr owns terminal viewing and navigation. Controller MCP tools
+(`coding_send`, `coding_read`, `check_state`, `execution_stop`) provide programmatic
+control of the execution.
+
+MCP `execution_resume` recreates a pane in the same plan,
+group, and endpoint using the saved native session and frozen launch settings.
+It can use an execution ID from `task_get.execution_history`. It fails if the
+task already has a live/unresolved execution, the native ID is missing, or the
+original profile is missing, disabled, or selects a different agent kind.
+The owning task must still exist. A resume is an
+explicit inspection: it does not replay a task prompt or change task status,
+and automatic final-task cleanup leaves it open until `execution_stop`.
+To repeat work in a new conversation, explicitly reopen the task and launch a
+new attempt; its previous report and conversation remain in history.
+
+To find a saved attempt, call `task_get` with the task ID. The current binding
+is `task.execution`; previous attempts are in `execution_history`. Pass that
+attempt's TASKR `execution_id` to resume. The result contains a **new**
+`execution.execution_id`, `inspection=true`, and `resumed_from` pointing to the
+source attempt. Use the new ID for runtime reads and explicit stop. An
+active inspection appears in `list_executions(project_id)` even when its task
+is finished; use `include_completed=true` to also list finished task bindings.
+
+Call `execution_resume` on the running controller that owns the task. It opens
+the pane without attaching a terminal client. The saved argument vector and
+environment take precedence
+over later profile or project-home edits. The original profile must still be
+enabled and select the same agent kind. Native configuration, authentication,
+and skills are read from the saved endpoint paths; their file contents are not
+snapshotted by TASKR.
+
+Each execution's `report` preserves its task status, outcome, and evidence when
+cleanup first runs. Later status updates or fresh attempts can change the task's
+current result while leaving that historical report intact. To repeat work,
+move the task to `Planned`, then use `task_start` with its saved `run_spec` or
+`start_coding_session` with explicit launch choices. A new launch submits the
+task prompt and creates a separate native conversation.
+
+`workspace_path` is the workspace/start directory interpreted by Herdr on the
+selected endpoint. taskr stores and passes the string without canonicalizing it
+against the controller host filesystem. Task scope is separate from runtime
+placement: `include_paths` and `exclude_paths` define the task work
+boundaries.
 
 ## Orchestration
 
-mmux includes a durable orchestration layer for coordinating agent work:
-projects contain Markdown plan briefs, plans contain executable tasks, and each
-task can own one recorded coder session. Projects are long-lived boundaries
-with required descriptions. Plans carry enough context to derive tasks and may
-carry optional plan-wide instructions that every task, validation, review, and
+taskr includes a durable orchestration layer for coordinating agent work:
+projects contain Markdown plan briefs, plans contain executable tasks, and
+each task can own executions. Projects are long-lived boundaries with required
+descriptions. Plans carry enough context to derive tasks and may carry
+optional plan-wide instructions that every task, validation, review, and
 quality-guard prompt receives. Tasks carry objective, scope, gates, outcome,
-blockers, dependency edges, and runtime placement for the attached session.
-Tasks may also carry an optional
-`run_spec` with `node_id`, `profile`, `workspace_path`, `bypass_permissions`,
-`role`, `kind`, `skills`, prompt `template`, scheduler `instruction`, and
-the top-level `auto_schedule` flag. `run_spec` describes how a task can be
-started; `auto_schedule` separately controls whether explicit
-`orchestration_next` runs may start it automatically.
+blockers, dependency edges, and launch intent for the attached execution.
+
+Tasks may also carry an optional `run_spec` with `endpoint_id`,
+`launch_profile_id`, `workspace_path`, `bypass_permissions`, `role`, `kind`,
+`skills`, prompt `template`, and `instruction`. `run_spec` describes how a
+task can be started; the task's `auto_schedule` flag separately controls
+whether explicit `orchestration_next` runs may start it automatically.
 
 Operators create or select a project, create a plan, derive tasks from that
-plan, then start or record coder sessions against individual tasks. Initial
-delegation uses `coding_task_send`, which renders deterministic task context
-before sending the operator's instruction to the coding CLI. Follow-up steering
-uses `coding_send`.
+plan, then start executions against individual tasks. Initial delegation uses
+`coding_task_send`, which renders deterministic task context before sending
+the operator's instruction to the coding agent. Follow-up steering uses
+`coding_send`.
 
 Scheduling is explicit. An operator or external MCP controller observes
 `orchestration_status`, records worker and validator results with
-`task_status_update` or `task_report`, optionally calls `orchestration_report`
-to inspect ready/skipped/error task classifications, then calls
-`orchestration_next` to start all currently ready tasks in that plan whose
-`auto_schedule` is true. A task is startable only when a `run_spec` exists,
-dependencies and required validations are ready, the task is `Backlog` or
-`Planned`, its profile is enabled, and it has no live recorded session.
-`orchestration_report` is read-only and never starts sessions.
-`orchestration_next` starts deterministic `mmux-*` sessions, records them on
-tasks, waits for coding readiness, sends task prompts, and marks tasks
-`Running`. Use `task_start` to explicitly start one task from its `run_spec`
-without requiring `auto_schedule=true`.
+`task_status_update`, optionally calls `orchestration_report` to inspect
+ready/skipped/error task classifications, then calls `orchestration_next` to
+start all currently ready tasks in that plan whose `auto_schedule` is true. A
+task is startable only when a `run_spec` exists, dependencies and required
+validations are ready, the task is `Backlog` or `Planned`, its launch profile
+is enabled, and it has no live execution. `orchestration_report` is read-only
+and never starts executions. `orchestration_next` launches agents through
+Herdr, records the executions on tasks, waits for coding readiness, sends task
+prompts, and marks tasks `Running`. Use `task_start` to explicitly start one
+task from its `run_spec` without requiring `auto_schedule=true`.
 
 Task-owned `gates` are acceptance checks. `TaskEdgeKind::Validates` makes a
 validator task operational: an edge from validator to target means downstream
@@ -711,7 +624,8 @@ Supported task edges in v1 are `DependsOn`, `ParentOf`, `Validates`, `Audits`,
 `Supersedes`, and `Related`. `DependsOn`, `ParentOf`, `Validates`, and
 `Supersedes` have orchestration semantics. `Audits` is non-gating review
 traceability; use `Validates` when an audit must approve gates before dependent
-work can start. `Supersedes` marks the `to` task as replaced by the `from`
+work can start. An unfinished `Audits` edge from audit to target also retains
+the target's successful worker until the audit finishes. `Supersedes` marks the `to` task as replaced by the `from`
 task, so the replaced task is skipped by scheduling and explicit starts.
 `Related` is durable traceability/navigation only.
 
@@ -732,142 +646,157 @@ will not start downstream `DependsOn` tasks while the dependency status is not
 ready or while linked validators have not approved it.
 
 `orchestration_status` is the compact source of truth for current project,
-plan, task, edge, outcome, blocker, task-session, cleanup, warning, and runtime
+plan, task, edge, outcome, blocker, execution, cleanup, warning, and runtime
 state. Use `task_get` when an exporter or operator needs one full stored task
-body, including objective, scope, gates, outcome/evidence, run spec, session,
-and incoming/outgoing edges. Use `plan_get` for the analogous full plan record,
-including the Markdown plan brief and optional plan instructions that the
-summary listings omit.
-`orchestration_prune` is dry-run by default; destructive cleanup/pruning
-requires explicit opt-in.
+body, including objective, scope, gates, outcome/evidence, run spec,
+executions, and incoming/outgoing edges. Use `plan_get` for the analogous full
+plan record, including the Markdown plan brief and optional plan instructions
+that the summary listings omit. `orchestration_prune` is dry-run by default;
+destructive cleanup requires explicit opt-in.
 
-For the full operator workflow, use the bundled `mmux-operator` skill.
+For the full operator workflow, use the bundled `taskr-operator` skill.
 
 ## MCP Surface
-
-Session and node tools:
-
-| Tool | Purpose |
-| ---- | ------- |
-| `list_nodes` | List registered execution nodes. |
-| `node.info` | Describe one execution node. |
-| `list_sessions` | List durable task sessions in a required `project_id` selector (project UUID id or slug), enriched with live node metadata when available. |
-| `admin_list_node_sessions` | Admin/debug tool that lists raw live tmux sessions on a node, including unrecorded sessions. |
-| `kill_session` | Kill a tmux session. |
-| `session_info` | Show panes, windows, dimensions, and running commands. |
-| `list_panes` | List panes in a session. |
-| `resize_pane` | Resize a pane for TUI applications. |
-
-Interaction tools:
-
-| Tool | Purpose |
-| ---- | ------- |
-| `send_input` | Send text to a session. |
-| `send_key` | Send a key such as `C-c`, `Escape`, or `Enter`. |
-| `capture_output` | Capture visible output or full scrollback. |
-| `wait_start` | Start a cancellable runtime wait job for `stable`, `sentinel`, `prompt`, or `coding-ready`. |
-| `wait_status` | Inspect a wait job as `pending`, `completed`, `failed`, or `canceled`. |
-| `wait_cancel` | Cancel a pending wait job without killing or interrupting the tmux session. |
-| `interact` | Send input and wait for stable output in one call. |
-| `exec` | Run a shell command in an existing live task-owned session and return cleaned output; never creates sessions. |
-
-Profile-aware coding tools:
-
-| Tool | Purpose |
-| ---- | ------- |
-| `list_coder_profiles` | List enabled built-in coder profiles. |
-| `start_coding_session` | Create or adopt a CLI session from its profile command, or from `permission_bypass_cmd` when `bypass_permissions = true`; returns without waiting for readiness. Requires an existing `task_id` and explicit runtime metadata; always records one `TaskSession` on the task. |
-| `coding_send` | Send a prompt to a coding CLI; rejects blank prompts and placeholder strings such as `null` or `undefined`. |
-| `coding_task_send` | Send an initial task-scoped prompt by rendering task context from orchestration state with template `task`, `validate`, `review`, or `quality-guard`, including optional plan-wide instructions when configured, optionally adding `context_task_ids` task cards for multi-task validation/review, then appending the provided instruction. The template selects the operating mode; the instruction supplies the concrete focus. |
-| `coding_read` | Read recent CLI output through profile-aware compaction by default; pass `raw = true` for the full tmux pane text. |
-| `coding_action` | Send `approve`, `reject`, `cancel`, `escape`, or `dismiss`. |
-| `check_state` | Non-blocking JSON state check with `has_prompt`, `promptable`, `busy`, and `turn_idle`. |
-
-`wait_start`, `wait_status`, and `wait_cancel` are the canonical orchestration
-wait API. Wait jobs are runtime-only in v1 and are not persisted to SQLite.
-Wait jobs can target any reachable execution node that supports mmux tmux
-command primitives. Omitting `node` targets the embedded `local` node, which
-may be local tmux or embedded Microsandbox. Embedded local wait jobs run outside
-the local tmux actor and poll through short actor calls, so pending long waits
-do not block `coding_read`, `check_state`, `capture_output`, or
-`coding_action`. Use `kind = "coding-ready"` with `profile` to wait until the
-current foreground turn is idle for the requested stability window.
-`check_state.promptable=true` means the CLI can accept text; it does not prove
-the current turn is finished. For codex, the prompt can be visible while
-`busy=true` and `turn_idle=false`, because codex may accept steering text while
-active work is still running.
 
 Orchestration tools:
 
 | Tool | Purpose |
 | ---- | ------- |
-| `project_create` | Create a durable orchestration project boundary with required `title` and `description`, a UUID id, and globally unique slug. Requires `--enable-admin-tools`. |
-| `project_update` | Update optional `codex_home`, `claude_home`, `opencode_home`, and `kimi_home` by project UUID or slug; omitted fields stay unchanged and `null` clears an override. Applies immediately to future launches. Requires `--enable-admin-tools`. |
-| `project_list` | List orchestration projects with total, active, and per-status plan/task counts. |
-| `project_status_update` | Set project status to `Active` or `Archived`; `project_id` accepts UUID id or slug. Requires `--enable-admin-tools`. |
-| `plan_create` | Create a durable plan brief under a project; `project_id` accepts UUID id or slug. Optional `instructions` stores Markdown instructions rendered into every task prompt for the plan. |
-| `plan_list` | List orchestration plans, optionally filtered by project. |
-| `plan_update` | Update mutable plan metadata: title, brief, and instructions. Set `instructions` to an empty string to clear it. |
-| `plan_status_update` | Update plan status with optional plan-level outcome. |
-| `plan_get` | Return one full stored plan record by plan id or unique slug, including its Markdown brief and optional instructions. |
-| `task_create` | Create a durable orchestration task inside a required `plan_id` selector (plan id or unique slug) with scope, notes, and gates; returns the created task object directly. |
-| `task_update` | Update mutable task metadata: title, objective, scope fields, gates, `auto_schedule`, and optional `run_spec`. |
-| `task_get` | Return one full stored task record by task id or unique slug, plus incoming and outgoing task edges. |
-| `task_start` | Explicitly start one task using its `run_spec`; does not require `auto_schedule=true`. |
-| `task_edge_add` | Add a task dependency or relationship edge. |
-| `task_edge_remove` | Remove a task dependency or relationship edge. |
-| `session_record` | Record durable runtime placement for an existing or manually started session; requires a valid task and a live node/session. |
-| `task_status_update` | Update task status with operator outcome and blockers. |
-| `task_report` | Submit durable task result status, outcome, blockers, and evidence; intended for operator/external-controller result commits. |
-| `orchestration_status` | Return compact project, plan, task, edge, task-session, cleanup, warning, and runtime-state summaries. |
-| `orchestration_report` | Read-only report of tasks that are ready or not ready for automatic orchestration. Never starts sessions. |
-| `orchestration_next` | Advance one plan by starting all currently ready tasks whose `auto_schedule` is true and `run_spec` exists. Requires `plan_id` id-or-slug. Executes by default; pass `dry_run=true` to preview. |
-| `orchestration_prune` | Dry-run or explicitly prune orchestration-owned live sessions, stale durable task sessions, and finished plans. Defaults to all categories and `older_than_days=14`; pass include flags to scope the operation. |
+| `project_create` | Create a durable project (admin; requires `--enable-admin-tools`). |
+| `project_update` | Update project configuration homes (admin). Omitted homes keep their value; explicit null clears. |
+| `project_status_update` | Set project status to `Active` or `Archived` (admin). |
+| `project_list` | List projects with plan/task counts. |
+| `plan_create` | Create a plan inside a project. |
+| `plan_update` | Update plan title/brief/instructions. |
+| `plan_status_update` | Set plan status; outcome is required for `Delivered`. |
+| `plan_get` | Get one plan with its tasks. |
+| `plan_list` | List plans, optionally filtered by project. |
+| `task_create` | Create a task inside a plan; optional `run_spec` pins the launch intent. |
+| `task_update` | Update task fields; `run_spec` may be replaced or cleared with null. |
+| `task_get` | Get one task with dependency blockers, superseding tasks, and previous execution history. |
+| `task_status_update` | Set task status; outcome required before `Passed`/`Delivered` on gated tasks. |
+| `task_edge_add` | Add a task edge (`ParentOf`, `DependsOn`, `Validates`, `Audits`, `Supersedes`, `Related`). |
+| `task_edge_remove` | Remove a task edge. |
+| `task_start` | Start one task now (or preview with `dry_run`); replaces non-active previous executions. |
+| `orchestration_status` | Orchestration overview with live execution phases; optionally filtered. |
+| `orchestration_report` | Report which tasks would start right now, without launching. |
+| `orchestration_next` | Run one scheduler pass (`dry_run` previews, otherwise launches tasks). |
+| `orchestration_prune` | Remove old retained worker terminals, stale execution records, and finished plans after observing live endpoints. |
 
-Backend node file tools:
+Launch and execution tools:
 
 | Tool | Purpose |
 | ---- | ------- |
-| `read_file` | Reads a file from the selected backend node with UTF-8/base64 encoding detection, compression sniffing, and MIME type. |
-| `save_file` | Writes UTF-8 or base64 content to the selected backend node and creates parent directories there. |
+| `start_coding_session` | Launch a coding agent for one task on an explicit endpoint + launch profile + workspace, then deliver the task prompt. |
+| `execution_adopt` | Adopt an already-running pane/agent as a task execution with observed provenance. |
+| `execution_resume` | Reopen a saved native conversation in a fresh plan/group pane without a prompt or task-status change. |
+| `execution_stop` | Save the report and native conversation reference, exit the coding agent, and close its verified pane. |
+| `list_executions` | List durable executions for a project with live runtime facts. |
+| `list_endpoints` | List Herdr endpoints (local + saved machine profiles) with live availability, plus the pending legacy-node migration counts. |
+| `list_launch_profiles` | List prepared base/native-profile choices for a required `endpoint_id`. |
+| `admin_environment_discover` | Admin: discover supported local native homes, profiles, and revisions. |
+| `admin_environment_sync` | Admin: explicitly prepare an environment on one endpoint; returns a durable job. |
+| `admin_environment_sync_status` | Admin: inspect sync progress and ready launch IDs. |
+| `admin_environment_sync_cancel` | Admin: cancel unfinished preparation without publishing launch choices. |
+
+Setting a task to `Passed`, `Delivered`, `Canceled`, or `Failed` automatically
+exits its recorded coding agent through Herdr after verifying the current
+occupant. TASKR interrupts the turn if necessary, submits the native `/exit`
+command, verifies the return to a shell, then closes the owned pane. The outcome,
+evidence, native conversation ID, and launch settings are saved before exit.
+Closing the last pane may remove its tab and space through Herdr; a later launch
+or resume recreates the layout. An unfinished task linked by an `Audits`
+edge keeps a `Passed`/`Delivered` worker available until all linked audits
+pass or end; the response reports `runtime_cleanup.state="held_for_audit"`
+and the audit task IDs. Cancellation/failure requests exit immediately. Cleanup
+retries every 10 seconds, including after restart.
+If cleanup cannot finish immediately, `task_status_update` returns an MCP tool
+error containing the saved final task and `runtime_cleanup.state="pending"`;
+the final status is already committed. Unrelated panes and shared workspaces
+remain available. A canceled startup cannot revive the task.
+
+If a live worker's native conversation ID has not yet been observed, cleanup
+remains pending to preserve resumability. Pane closure verifies the recorded
+layout, immutable terminal ID, and sole shell foreground. Changed occupants,
+manual commands, and unavailable endpoints remain untouched.
+
+`orchestration_prune` or `taskr prune --execute` removes old execution metadata,
+finished plans, and legacy leftover shell terminals after the configured age
+(14 days by default). Dry-run previews the selection. The same ownership and
+foreground checks protect remaining terminals. Native CLI conversation files
+are never deleted by exit or prune; after TASKR records are pruned, use the native
+CLI's resume picker or saved ID. Neither operation stops the Herdr server.
+
+Coding interaction tools:
+
+| Tool | Purpose |
+| ---- | ------- |
+| `coding_send` | Send a raw prompt to a task execution's coding agent. |
+| `coding_task_send` | Render a task-aware prompt (template, gates, scope, context cards) and deliver it to a task execution. |
+| `coding_read` | Read a task execution's coding-agent terminal output. |
+| `capture_output` | Capture a task execution's raw pane output. |
+| `check_state` | Truthful lifecycle and occupant facts for one task execution. |
+| `send_input` | Send literal text (optionally followed by Enter) to a task execution's agent. |
+| `send_key` | Send one key press to a task execution's agent. |
+| `coding_action` | Send a semantic action (`approve`, `reject`, `cancel`, `escape`, `dismiss`, `continue`) to a task execution's agent. |
+| `exec` | Run one shell command in an active execution's verified available shell pane. |
+
+Wait tools:
+
+| Tool | Purpose |
+| ---- | ------- |
+| `wait_start` | Start an async wait on a task execution (`stable`, `sentinel`, or `coding_ready`). |
+| `wait_status` | Poll one async wait job. |
+| `wait_cancel` | Cancel one async wait job. |
+
+Admin debug tools:
+
+| Tool | Purpose |
+| ---- | ------- |
+| `admin_list_endpoint_agents` | Admin: list every recognized live coding agent on one endpoint. Requires `--enable-admin-tools`. |
+| `endpoint_migrate` | Admin: atomically replace unresolved legacy node references in stored run specs and execution endpoints with a selected Herdr endpoint ID. Creates no routing alias and does not launch/adopt workers. Requires `--enable-admin-tools`. |
+
+`wait_start`, `wait_status`, and `wait_cancel` are the canonical orchestration
+wait API. Wait jobs are runtime-only in v1 and are not persisted to SQLite.
+Use `kind="coding_ready"` to wait for Herdr's `idle` or `done` lifecycle state.
+`stability_seconds` applies to `stable` output waits. `check_state` reports
+lifecycle and occupant facts; readiness does not mean the task was accepted.
+
+Tool argument schemas reject unknown fields. Arguments named `node`,
+`session`, or `coder_profile` are no longer part of the surface and are
+rejected as unknown; use `endpoint_id`, execution ids, and
+`launch_profile_id` instead.
 
 ## Resources and Prompts
 
 Resources:
 
-- `profile://{name}` returns a loaded profile as JSON.
-- `session://{session_name}/output` returns recent pane output.
-- `session://{session_name}/info` returns tmux metadata.
-- `session://{session_name}/scrollback` returns full pane scrollback.
+- `taskr://orchestration/status` returns the current orchestration status
+  snapshot as JSON.
+- `taskr://project/{project_id}/status` returns the per-project status snapshot
+  (project UUID id or slug).
 
 Prompts:
 
-- `drive-coding-cli` gives the recommended workflow for operating a coding CLI.
-- `debug-session` gives a diagnostic checklist for stuck or garbled sessions.
+- `coding-task-send` — task prompt for a coding worker.
+- `coding-validate-send` — validation prompt for a coding worker.
+- `coding-review-send` — review prompt for a coding worker.
+- `coding-quality-guard-send` — quality-guard prompt for a coding worker.
+
+Each prompt takes one required argument, `task_id_or_slug`.
 
 ## Security
 
-mmux is a terminal controller. Giving a client access to a writable mmux server
-is equivalent to giving that client shell access as the server user. The local
-backend is not sandboxed. Use trusted clients only, or run work through a
-sandboxed backend such as Microsandbox.
+taskr is an agent controller with controller-host file access and the ability
+to launch agents in arbitrary workspace paths. Giving a client access to a
+writable taskr server is equivalent to giving that client broad control of the
+controller host and of every configured Herdr endpoint. Use trusted clients
+only.
 
 The default bind host is loopback-only. A non-loopback MCP bind without a token
 is rejected unless you deliberately pass `--allow-remote-without-mcp-token`.
-That flag also ignores the default `MMUX_MCP_TOKEN` env fallback and is
+That flag also ignores the default `TASKR_MCP_TOKEN` env fallback and is
 mutually exclusive with explicit MCP token flags/files.
-Node wire RPC is rejected unless you configure `--wire-token`, configure
-`--wire-mtls`, or deliberately pass `--allow-unauthenticated-node-wire`.
-Embedded modes do not need node wire credentials for the embedded node, but the
-public MCP endpoint still needs either MCP bearer auth or an explicit
-unauthenticated bind decision for non-local exposure. For distributed
-bearer-token mode, use separate MCP and wire tokens:
-
-```bash
-export MMUX_MCP_TOKEN="$(openssl rand -hex 32)"
-export MMUX_WIRE_TOKEN="$(openssl rand -hex 32)"
-make run-controller CONTROLLER_ARGS="--host <bind-host> --mcp-token $MMUX_MCP_TOKEN --wire-token $MMUX_WIRE_TOKEN"
-```
 
 Authenticated requests must include:
 
@@ -875,63 +804,55 @@ Authenticated requests must include:
 Authorization: Bearer <token>
 ```
 
-Backend node file tools (`read_file` and `save_file`) operate in the selected
-node/backend filesystem namespace. They are separate from coder-session
-`workspace_path`, session placement, and terminal command sandboxing.
+The `x-mcp-token` header is accepted as an alternative. Cross-site browser
+requests (`Sec-Fetch-Site: cross-site`) are rejected to blunt DNS-rebinding
+and drive-by POSTs.
 
-Request and output limits are configurable with `--max-read-bytes`,
-`--max-write-bytes`, `--max-timeout-seconds`, `--max-request-bytes`, and
+Controller credentials stay out of worker environments: launch profiles carry
+non-secret configuration environment only, and per-project agent homes are
+configuration paths, not credential stores. Do not put secrets into
+`profiles[].env`; provision credentials on the endpoint through your own
+mechanism.
+
+TASKR filesystem access and file transfer are deferred. The `read_file` and
+`save_file` MCP tools have been removed; calls to those names fail as unknown
+tools. Their `--max-read-bytes` and `--max-write-bytes` flags are also removed
+and rejected. Coding agents use their native file tools on the execution
+endpoint; deployment tooling provisions repositories, configuration, and skills
+there. Terminal output reads and prompt submission remain available.
+
+Request and output limits are configurable with `--max-timeout-seconds`,
+`--max-request-bytes`, and
 `--max-capture-bytes`.
 
 ## Architecture
 
 ```text
 .
-├── src/main.rs
+├── src/main.rs                  # CLI dispatch: controller, project, prune
 ├── crates/
-│   ├── mmux-controller/       # MCP server, auth, policy, node registry
-│   ├── mmux-node/             # tmux/filesystem adapter and built-in profiles
-│   ├── mmux-shared/           # shared profile and file DTOs
-│   └── mmux-wire/             # ConnectRPC/Buffa wire schema and generated code
-├── example-backends/
-│   ├── local/                 # local backend README
-│   └── microsandbox/          # sandbox config, scripts, assets, README
+│   ├── taskr-controller/         # MCP server, auth, policy, orchestration actors, store
+│   ├── taskr-core/              # storage-agnostic model, store interface, mutation service
+│   ├── taskr-herdr/              # Herdr execution adapter, launch profiles, agent naming
+│   └── taskr-environment/        # native environment discovery and endpoint deployment
+├── taskr-cormilo-agent/          # bundled orchestration agent runtime
 └── Makefile
 ```
 
-Runtime flow for remote nodes:
+Runtime flow:
 
-1. `mmux controller` starts MCP and ConnectRPC HTTP routes.
-2. A node starts with `mmux node --controller-url ...`.
-3. The node registers, sends heartbeats, and polls for commands.
-4. MCP tool calls enqueue node commands.
-5. The node executes tmux/file work locally and submits results.
-
-The canonical controller/node wire schema lives in
-`crates/mmux-wire/proto/mmux/wire/v1/mmux_node.proto`.
-
-## Backend Layout
-
-- Local mode uses canonical built-in coder profiles.
-- `example-backends/microsandbox/` shows how to prepare a local Microsandbox
-  runtime and attach mmux to it.
-
-Microsandbox lifecycle belongs to `msb`. mmux does not create, launch, stop,
-snapshot, import, or export Microsandbox runtimes. For single-binary local
-mode, the controller attaches an embedded host-side connector with
-`--enable-microsandbox-node --sandbox-name <name>` and exposes it as node
-`local`. For distributed mode, run `mmux node --backend microsandbox
---sandbox-name <name>` and register it to a controller. In both modes the
-connector runs on the host and attaches to an existing sandbox by name, so
-controller credentials and node private keys stay out of sandbox config and
-sandbox files.
-
-Workspace persistence is handled by Microsandbox or the surrounding deployment
-system, not by mmux. The local example Makefile creates a sandbox with
-`example-backends/microsandbox/workspace/` mounted read-write at `/workspace`
-and setup assets mounted read-only at `/mmux-setup`. For other deployments,
-configure mounts with `msb`, Kubernetes, or your image/runtime tooling before
-starting mmux.
+1. `taskr controller` starts the MCP HTTP endpoint and opens the durable
+   orchestration store (`taskr.db` in the store path).
+2. An MCP client creates projects, plans, and tasks, and optionally attaches
+   launch profiles and `run_spec`s.
+3. A launch tool call (`start_coding_session`, `task_start`,
+   `orchestration_next`) asks Herdr to allocate a workspace/tab/pane and start
+   the configured agent, then records the durable execution binding.
+4. Interaction tools (`coding_send`, `coding_read`, `check_state`, waits)
+   drive the agent through Herdr.
+5. Outcomes, blockers, and evidence are recorded back on tasks; pruning
+   removes stale execution records and finished plans after observing live
+   endpoints through Herdr.
 
 ## Health Check
 
@@ -942,7 +863,7 @@ curl "http://<controller-host>:3000/health"
 The response body is:
 
 ```text
-OK
+ok
 ```
 
 ## License

@@ -15,6 +15,26 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  core-wasm:
+    name: Check core and execution ports for Workers Wasm
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Rust with Wasm target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check library and public API consumers
+        run: |
+          make check-core-wasm
+          make check-execution-wasm
+
   test:
     name: Test on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
@@ -38,34 +58,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libcap-ng-dev pkg-config
 
-      - name: Cache Homebrew downloads
-        if: runner.os == 'macOS'
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/Library/Caches/Homebrew/downloads
-            ~/Library/Caches/Homebrew/api
-          key: ${{ runner.os }}-${{ runner.arch }}-homebrew-tmux-v1
-          restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-homebrew-tmux-
-
-      - name: Install macOS test dependencies
-        if: runner.os == 'macOS'
+      # The Rust test suite is hermetic (every herdr invocation goes through
+      # a per-test fake CLI), but CI still provisions the real Herdr CLI so
+      # packaging assumptions (install path, launcher flags, version probe)
+      # stay honest. See docs/deployment.md for the operator equivalent.
+      - name: Install Herdr CLI
         shell: bash
         run: |
           set -euo pipefail
-          brew_bin="$(brew --prefix)/bin"
-          echo "$brew_bin" >> "$GITHUB_PATH"
-          export PATH="$brew_bin:$PATH"
-          if ! command -v tmux >/dev/null 2>&1; then
-            brew install tmux
-          fi
-          brew link tmux || true
-          command -v tmux
-          tmux -V
-          tmux -L mmux-ci-smoke new-session -d -s mmux-ci-smoke-session 'sleep 30'
-          tmux -L mmux-ci-smoke has-session -t mmux-ci-smoke-session
-          tmux -L mmux-ci-smoke kill-session -t mmux-ci-smoke-session
+          curl -fsSL https://herdr.dev/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/herdr" --version
 
       - name: Check
         run: cargo check --workspace --locked
