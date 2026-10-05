@@ -26,14 +26,6 @@ The core idea is simple:
 - Agents run in Herdr-owned panes. Controller credentials stay out of worker
   environments; launch profiles carry configuration, not secrets.
 
-The execution boundary now exposes portable command and endpoint lifecycle ports.
-Native process/SSH transport and a container binding adapter share Herdr command
-construction and parsing. Runtime generations fence saved placement, and
-uncertain allocations remain unresolved rather than authorize duplicate launches.
-See [execution contracts and Cloudflare host requirements](docs/execution-ports.md).
-The container adapter is tested with bindings and compiles for Wasm; a deployed
-Cloudflare host and SDK integration remain separate work.
-
 ## Project Status
 
 taskr is in early development. The project aims to provide a secure control
