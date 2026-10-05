@@ -1,4 +1,4 @@
-name: mmux Release
+name: taskr Release
 
 on:
   push:
@@ -33,51 +33,30 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libcap-ng-dev musl-tools pkg-config
 
-      - name: Cache Homebrew downloads
-        if: runner.os == 'macOS'
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/Library/Caches/Homebrew/downloads
-            ~/Library/Caches/Homebrew/api
-          key: ${{ runner.os }}-${{ runner.arch }}-homebrew-tmux-v1
-          restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-homebrew-tmux-
-
-      - name: Install macOS test dependencies
-        if: runner.os == 'macOS'
+      - name: Install Herdr CLI
         shell: bash
         run: |
           set -euo pipefail
-          brew_bin="$(brew --prefix)/bin"
-          echo "$brew_bin" >> "$GITHUB_PATH"
-          export PATH="$brew_bin:$PATH"
-          if ! command -v tmux >/dev/null 2>&1; then
-            brew install tmux
-          fi
-          brew link tmux || true
-          command -v tmux
-          tmux -V
-          tmux -L mmux-ci-smoke new-session -d -s mmux-ci-smoke-session 'sleep 30'
-          tmux -L mmux-ci-smoke has-session -t mmux-ci-smoke-session
-          tmux -L mmux-ci-smoke kill-session -t mmux-ci-smoke-session
+          curl -fsSL https://herdr.dev/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/herdr" --version
 
       - name: Test
         run: cargo test --workspace --locked
 
-      - name: Build mmux binary
+      - name: Build taskr binary
         shell: bash
         run: |
           set -euo pipefail
           if [[ "$RUNNER_OS" == "Linux" ]]; then
-            cargo build --release --locked --bin mmux
+            cargo build --release --locked --bin taskr
           elif [[ "$RUNNER_OS" == "macOS" ]]; then
             if [[ "$(uname -m)" == "arm64" ]]; then
               rustup target add aarch64-apple-darwin
-              cargo build --release --locked --target aarch64-apple-darwin --bin mmux
+              cargo build --release --locked --target aarch64-apple-darwin --bin taskr
             else
               rustup target add x86_64-apple-darwin
-              cargo build --release --locked --target x86_64-apple-darwin --bin mmux
+              cargo build --release --locked --target x86_64-apple-darwin --bin taskr
             fi
           else
             echo "Unsupported platform: $RUNNER_OS"
@@ -90,22 +69,22 @@ jobs:
           set -euo pipefail
           mkdir -p artifacts
           if [[ "$RUNNER_OS" == "Linux" ]]; then
-            package_dir="artifacts/mmux-linux-x86_64"
+            package_dir="artifacts/taskr-linux-x86_64"
             mkdir -p "$package_dir"
-            cp target/release/mmux "$package_dir/mmux"
+            cp target/release/taskr "$package_dir/taskr"
           elif [[ "$RUNNER_OS" == "macOS" ]]; then
             if [[ "$(uname -m)" == "arm64" ]]; then
-              package_dir="artifacts/mmux-darwin-arm64"
+              package_dir="artifacts/taskr-darwin-arm64"
               mkdir -p "$package_dir"
-              cp target/aarch64-apple-darwin/release/mmux "$package_dir/mmux"
+              cp target/aarch64-apple-darwin/release/taskr "$package_dir/taskr"
             else
-              package_dir="artifacts/mmux-darwin-x86_64"
+              package_dir="artifacts/taskr-darwin-x86_64"
               mkdir -p "$package_dir"
-              cp target/x86_64-apple-darwin/release/mmux "$package_dir/mmux"
+              cp target/x86_64-apple-darwin/release/taskr "$package_dir/taskr"
             fi
           fi
           cd artifacts
-          for dir in mmux-*; do
+          for dir in taskr-*; do
             tar -czf "${dir}.tar.gz" -C "$dir" .
           done
 
@@ -129,6 +108,7 @@ jobs:
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
 
       - name: Download archives
         uses: actions/download-artifact@v6
@@ -145,7 +125,7 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           name: "Release ${{ github.ref_name }}"
-          body: "Automated mmux release for ${{ github.ref_name }}."
+          body: "Automated taskr release for ${{ github.ref_name }}."
           draft: false
           prerelease: false
           files: artifacts/*.tar.gz
@@ -158,7 +138,7 @@ jobs:
           set -euo pipefail
 
           VERSION="${GITHUB_REF_NAME#v}"
-          cd npm/mmux
+          cd npm/taskr
 
           npm version "$VERSION" --no-git-tag-version --allow-same-version
           mkdir -p artifacts

@@ -10,18 +10,19 @@ define update_version
 	perl -0pi -e 's/(\[workspace\.package\]\nversion = ")[^"]+(")/$${1}$(1)$${2}/' $(CARGO_TOML)
 endef
 
-.PHONY: help build check test clean lint release release-tag npm-package npm-pack-dry-run npm-pack update-patch update-minor update-major run-local run-controller run-node run-cormilo-agent wire-check-tools wire-generate
+.PHONY: help build check check-core-wasm check-execution-wasm test clean lint release release-tag npm-package npm-pack-dry-run npm-pack update-patch update-minor update-major run-local run-controller run-cormilo-agent
 
 LOCAL_ARGS ?=
 CONTROLLER_ARGS ?=
-NODE_ARGS ?=
-NPM_CACHE ?= /tmp/mmux-npm-cache
+NPM_CACHE ?= /tmp/taskr-npm-cache
 
 help:
-	@printf 'mmux make targets\n'
+	@printf 'taskr make targets\n'
 	@printf '\nBuild/test:\n'
 	@printf '  make build             Debug-build the full Cargo workspace\n'
 	@printf '  make check             Type-check the full Cargo workspace\n'
+	@printf '  make check-core-wasm   Check taskr-core and consumers for Workers Wasm\n'
+	@printf '  make check-execution-wasm  Check Herdr/container and companion ports for Wasm\n'
 	@printf '  make test              Run workspace tests\n'
 	@printf '  make lint              Run clippy across workspace targets\n'
 	@printf '  make release           Release-build the full Cargo workspace\n'
@@ -30,18 +31,14 @@ help:
 	@printf '  make update-minor      Bump workspace minor version\n'
 	@printf '  make update-major      Bump workspace major version\n'
 	@printf '  make release-tag       Tag v$$(workspace.package.version) and push it to trigger GitHub release\n'
-	@printf '  make npm-package       Build current-platform npm archive under npm/mmux/artifacts\n'
+	@printf '  make npm-package       Build current-platform npm archive under npm/taskr/artifacts\n'
 	@printf '  make npm-pack-dry-run  Build package, then inspect npm pack contents\n'
-	@printf '  make npm-pack          Build package, then run npm pack in npm/mmux\n'
+	@printf '  make npm-pack          Build package, then run npm pack in npm/taskr\n'
 	@printf '\nRun locally:\n'
-	@printf '  make run-local         Run mmux controller with the built-in local node enabled\n'
-	@printf '  make run-controller    Run mmux controller\n'
-	@printf '  make run-node          Run mmux node\n'
-	@printf '  make run-cormilo-agent Run the local Cormilo mmux orchestration agent\n'
-	@printf '\nWire protocol:\n'
-	@printf '  make wire-check-tools  Verify buf/buffa/connect-rust generators\n'
-	@printf '  make wire-generate     Generate crates/mmux-wire sources\n'
-	@printf '\nSandbox backend assets live under example-backends/; core make targets do not create sandboxes.\n'
+	@printf '  make run-local         Run taskr controller against the local Herdr server\n'
+	@printf '  make run-controller    Run taskr controller\n'
+	@printf '  make run-cormilo-agent Run the local Cormilo taskr orchestration agent\n'
+	@printf '\nHerdr is an external terminal/agent engine; TASKR reaches it via --herdr-bin.\n'
 
 # Default workspace build (debug)
 build:
@@ -50,6 +47,14 @@ build:
 # Check the full workspace without producing binaries
 check:
 	cargo check --workspace
+
+# Install the target first: rustup target add wasm32-unknown-unknown
+check-core-wasm:
+	cargo check -p taskr-core --locked --target wasm32-unknown-unknown --features wasm-js --all-targets
+
+# Portable ports must not pick up native runner/catalog features.
+check-execution-wasm:
+	cargo check -p taskr-herdr -p taskr-environment --no-default-features --locked --target wasm32-unknown-unknown --all-targets
 
 # Release build
 release:
@@ -89,7 +94,7 @@ release-tag:
 		exit 1; \
 	fi
 	cargo test --workspace
-	cargo build --release --bin mmux
+	cargo build --release --bin taskr
 	git tag -a v$(VERSION) -m "Release version v$(VERSION)"
 	git push origin v$(VERSION)
 	@echo "Release v$(VERSION) tagged. GitHub Actions will build and publish artifacts."
@@ -98,10 +103,10 @@ npm-package:
 	./scripts/npm-package.sh
 
 npm-pack-dry-run: npm-package
-	cd npm/mmux && npm --cache $(NPM_CACHE) pack --dry-run
+	cd npm/taskr && npm --cache $(NPM_CACHE) pack --dry-run
 
 npm-pack: npm-package
-	cd npm/mmux && npm --cache $(NPM_CACHE) pack
+	cd npm/taskr && npm --cache $(NPM_CACHE) pack
 
 # Run workspace tests
 test:
@@ -111,31 +116,16 @@ test:
 lint:
 	cargo clippy --workspace --all-targets
 
-# Run the controller with the built-in local node enabled
+# Run the controller against the local Herdr server
 run-local:
-	cargo run -- controller --enable-local-node $(LOCAL_ARGS)
+	cargo run -- controller $(LOCAL_ARGS)
 
 # Run only the MCP controller entrypoint
 run-controller:
 	cargo run -- controller $(CONTROLLER_ARGS)
 
-# Run the node scaffold entrypoint
-run-node:
-	cargo run -- node $(NODE_ARGS)
-
 run-cormilo-agent:
-	$(MAKE) -C mmux-cormilo-agent start
-
-# Verify the local wire-protocol generator toolchain used by crates/mmux-wire
-wire-check-tools:
-	which buf
-	which protoc-gen-buffa
-	which protoc-gen-buffa-packaging
-	which protoc-gen-connect-rust
-
-# Generate ConnectRPC/Buffa wire sources from crates/mmux-wire/proto
-wire-generate: wire-check-tools
-	cd crates/mmux-wire && buf generate
+	$(MAKE) -C taskr-cormilo-agent start
 
 # Clean build artifacts
 clean:

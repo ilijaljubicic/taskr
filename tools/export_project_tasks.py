@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-"""Export a project's mmux cards (plans + tasks) into a single HTML page.
+"""Export a project's taskr cards (plans + tasks) into a single HTML page.
 
-Queries the mmux MCP controller (JSON-RPC over streamable HTTP) for the
+Queries the taskr MCP controller (JSON-RPC over streamable HTTP) for the
 project's plans and tasks and writes ONE self-contained
 `index.html` — a single-page site with a sidebar menu (plans -> tasks),
 in-page anchor links, status badges, a live filter box, and each card's
 full detail (objective, outcome, notes, paths, gates, edges, raw JSON).
-No external assets; opens offline. Read-only against mmux.
+No external assets; opens offline. Read-only against taskr.
 
 Usage:
   python3 export-project-tasks.py <project-slug-or-id> [--out DIR] [--url URL]
 
-<project-slug-or-id> is required (mmux resolves a globally-unique slug or
-a project UUID). Default out=/tmp/mmux-export/<project>, url=
+<project-slug-or-id> is required (taskr resolves a globally-unique slug or
+a project UUID). Default out=/tmp/taskr-export/<project>, url=
 http://127.0.0.1:3000/mcp.
 """
 from __future__ import annotations
@@ -65,7 +65,7 @@ def call(url, tool, args, soft=False):
     if not msg or "error" in (msg or {}):
         if soft:
             return None
-        raise SystemExit(f"mmux {tool} error: {json.dumps(msg)[:400]}")
+        raise SystemExit(f"taskr {tool} error: {json.dumps(msg)[:400]}")
     blob = "\n".join(c.get("text", "") for c in msg["result"].get("content", []))
     try:
         return json.loads(blob)
@@ -81,7 +81,7 @@ BODY_FIELDS = ("objective", "gates", "scope", "include_paths", "exclude_paths",
 
 
 def fetch_body(url, tid):
-    """Fetch a task's authored body via task_get (mmux). Returns a dict of
+    """Fetch a task's authored body via task_get (taskr). Returns a dict of
     BODY_FIELDS, or {} if task_get is unavailable/empty (graceful: the
     exporter still works before task_get ships, just summary-only)."""
     res = call(url, "task_get", {"task_id": tid}, soft=True)
@@ -107,7 +107,7 @@ def fetch_body(url, tid):
 
 
 def fetch_plan_body(url, pid):
-    """Fetch a plan's authored brief via plan_get (mmux). Returns a dict with
+    """Fetch a plan's authored brief via plan_get (taskr). Returns a dict with
     `brief` (and `outcome` if present), or {} if plan_get is unavailable
     (graceful: the exporter still works before plan_get ships — plans then
     render summary-only, i.e. outcome but no brief)."""
@@ -222,7 +222,7 @@ def build_html(project, plans, tasks):
 
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>mmux cards — {e(project)}</title>
+<title>taskr cards — {e(project)}</title>
 <style>
 :root{{color-scheme:light dark}}
 *{{box-sizing:border-box}}
@@ -257,7 +257,7 @@ pre{{background:#0001;padding:10px;border-radius:6px;overflow:auto;font-size:12p
 <ul>{''.join(nav)}</ul>
 </aside>
 <main id="main"><a id="top"></a>
-<h1>mmux cards — {e(project)}</h1>
+<h1>taskr cards — {e(project)}</h1>
 <p>{summary}</p>
 {''.join(body)}
 </main>
@@ -272,14 +272,14 @@ document.querySelectorAll('.card,.nav-task').forEach(el=>{{
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("project", help="project slug or UUID (mmux resolves either)")
-    ap.add_argument("--out", default=None, help="output dir (default /tmp/mmux-export/<project>)")
+    ap.add_argument("project", help="project slug or UUID (taskr resolves either)")
+    ap.add_argument("--out", default=None, help="output dir (default /tmp/taskr-export/<project>)")
     ap.add_argument("--url", default=DEFAULT_URL)
     ap.add_argument("--no-bodies", action="store_true",
                     help="skip per-task task_get body fetch (summary-only)")
     args = ap.parse_args()
 
-    out = args.out or os.path.join("/tmp/mmux-export",
+    out = args.out or os.path.join("/tmp/taskr-export",
                                    re.sub(r"[^A-Za-z0-9._-]+", "-", args.project))
     status = call(args.url, "orchestration_status",
                   {"project_id": args.project, "include_completed": True})

@@ -1,0 +1,16 @@
+[package]
+name = "taskr-core"
+description = "Storage-agnostic task orchestration state, rules and transactional service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+wasm-js = ["uuid/js"]
+
+[dependencies]
+serde = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

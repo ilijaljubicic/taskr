@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="${MMUX_REPO:-ilijaljubicic/mmux}"
+REPO="${TASKR_REPO:-ilijaljubicic/taskr}"
 VERSION="${VERSION:-latest}"
 
 OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
@@ -24,7 +24,7 @@ case "$OS" in
     ;;
 esac
 
-ARCHIVE="mmux-${PLATFORM}.${EXT}"
+ARCHIVE="taskr-${PLATFORM}.${EXT}"
 
 if [ "$VERSION" = "latest" ]; then
   VERSION="$(
@@ -32,7 +32,7 @@ if [ "$VERSION" = "latest" ]; then
       | sed -nE 's/.*"tag_name": *"([^"]+)".*/\1/p'
   )"
   if [ -z "$VERSION" ]; then
-    echo "Could not resolve latest mmux release for ${REPO}" >&2
+    echo "Could not resolve latest taskr release for ${REPO}" >&2
     exit 1
   fi
 fi
@@ -45,21 +45,21 @@ echo "Downloading ${ARCHIVE} (${VERSION}) from ${URL}"
 curl -fsSL "$URL" -o "$TMPDIR/$ARCHIVE"
 tar -xzf "$TMPDIR/$ARCHIVE" -C "$TMPDIR"
 
-MMUX_BIN=""
-for candidate in "$TMPDIR/mmux" "$TMPDIR/mmux-${PLATFORM}"; do
+TASKR_BIN=""
+for candidate in "$TMPDIR/taskr" "$TMPDIR/taskr-${PLATFORM}"; do
   if [ -f "$candidate" ]; then
-    MMUX_BIN="$candidate"
+    TASKR_BIN="$candidate"
     break
   fi
 done
-if [ -z "$MMUX_BIN" ]; then
-  MMUX_BIN="$(find "$TMPDIR" -maxdepth 1 -type f -name 'mmux-*' ! -name "$ARCHIVE" | head -n 1)"
+if [ -z "$TASKR_BIN" ]; then
+  TASKR_BIN="$(find "$TMPDIR" -maxdepth 1 -type f -name 'taskr-*' ! -name "$ARCHIVE" | head -n 1)"
 fi
-if [ -z "$MMUX_BIN" ]; then
-  echo "Archive did not contain an mmux binary" >&2
+if [ -z "$TASKR_BIN" ]; then
+  echo "Archive did not contain a taskr binary" >&2
   exit 1
 fi
-chmod +x "$MMUX_BIN"
+chmod +x "$TASKR_BIN"
 
 if [ -z "${INSTALL_DIR:-}" ]; then
   if [ "$OS" = "darwin" ] && [ -d "/opt/homebrew/bin" ]; then
@@ -71,9 +71,9 @@ fi
 
 mkdir -p "$INSTALL_DIR" 2>/dev/null || sudo mkdir -p "$INSTALL_DIR"
 if [ -w "$INSTALL_DIR" ]; then
-  mv "$MMUX_BIN" "$INSTALL_DIR/mmux"
+  mv "$TASKR_BIN" "$INSTALL_DIR/taskr"
 else
-  sudo mv "$MMUX_BIN" "$INSTALL_DIR/mmux"
+  sudo mv "$TASKR_BIN" "$INSTALL_DIR/taskr"
 fi
 
-echo "Installed mmux ${VERSION} to ${INSTALL_DIR}/mmux"
+echo "Installed taskr ${VERSION} to ${INSTALL_DIR}/taskr"

@@ -1,50 +1,35 @@
 [workspace]
 members = [
     ".",
-    "crates/mmux-controller",
-    "crates/mmux-controller-core",
-    "crates/mmux-node",
-    "crates/mmux-shared",
-    "crates/mmux-wire",
+    "crates/taskr-controller",
+    "crates/taskr-core",
+    "crates/taskr-herdr",
+    "crates/taskr-environment",
 ]
 resolver = "2"
 
 [workspace.package]
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 license = "Apache-2.0"
 
 [workspace.dependencies]
 axum = "0.8"
-base64 = "0.22.1"
-buffa = { version = "0.4", features = ["json"] }
 clap = { version = "4.5", features = ["derive"] }
-connectrpc = { git = "https://github.com/anthropics/connect-rust", rev = "d0bee62d4a3f7316d092f9b3920fa694928c60ee", default-features = false, features = ["axum", "client", "client-tls"] }
-http = "1"
-http-body = "1"
-indoc = "2"
-mime = "0.3.17"
 rmcp = { version = "1.7", features = ["server", "transport-streamable-http-server"] }
 ractor = "0.15"
-ractor_actors = { version = "0.4.9", default-features = false, features = ["time"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
-rustls-pemfile = "2"
-rustls = "0.23"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "io-util"] }
-tokio-rustls = "0.26"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "io-util", "sync"] }
 tower-http = { version = "0.6", features = ["cors"] }
 uuid = { version = "1", features = ["v4"] }
-webpki-roots = "1"
-x509-parser = "0.16"
 
 [package]
-name = "mmux"
+name = "taskr"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
-mmux-controller = { path = "crates/mmux-controller" }
-mmux-node = { path = "crates/mmux-node" }
+taskr-controller = { path = "crates/taskr-controller" }

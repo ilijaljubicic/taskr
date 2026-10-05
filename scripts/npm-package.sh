@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VERSION="$(
   awk '/^\[workspace.package\]/{in_workspace_package=1; next} /^\[/{in_workspace_package=0} in_workspace_package && /^version = /{gsub(/"/, "", $3); print $3; exit}' "$ROOT/Cargo.toml"
 )"
-NPM_DIR="$ROOT/npm/mmux"
+NPM_DIR="$ROOT/npm/taskr"
 ARTIFACTS_DIR="$NPM_DIR/artifacts"
 
 OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
@@ -22,19 +22,19 @@ case "$OS" in
   *) echo "Unsupported OS: $OS" >&2; exit 1 ;;
 esac
 
-ARCHIVE="mmux-${PLATFORM}.tar.gz"
-PACKAGE_DIR="$ROOT/target/npm-package/mmux-${PLATFORM}"
+ARCHIVE="taskr-${PLATFORM}.tar.gz"
+PACKAGE_DIR="$ROOT/target/npm-package/taskr-${PLATFORM}"
 
-echo "Preparing @mmux/mmux npm package for ${PLATFORM} at version ${VERSION}"
+echo "Preparing @mmux/taskr npm package for ${PLATFORM} at version ${VERSION}"
 
 rm -rf "$PACKAGE_DIR"
 mkdir -p "$PACKAGE_DIR" "$ARTIFACTS_DIR"
 
-if [ "${MMUX_NPM_SKIP_BUILD:-0}" != "1" ]; then
-  cargo build --release --bin mmux
+if [ "${TASKR_NPM_SKIP_BUILD:-0}" != "1" ]; then
+  cargo build --release --bin taskr
 fi
 
-cp "$ROOT/target/release/mmux" "$PACKAGE_DIR/mmux"
+cp "$ROOT/target/release/taskr" "$PACKAGE_DIR/taskr"
 
 tar -czf "$ARTIFACTS_DIR/$ARCHIVE" -C "$PACKAGE_DIR" .
 

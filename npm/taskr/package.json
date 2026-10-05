@@ -1,0 +1,21 @@
+{
+  "name": "@mmux/taskr",
+  "version": "0.5.0",
+  "description": "Durable agent-orchestration MCP control plane; Herdr drives the terminals and coding agents.",
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/ilijaljubicic/taskr",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ilijaljubicic/taskr.git"
+  },
+  "bin": {
+    "taskr": "bin/taskr.js"
+  },
+  "files": [
+    "bin/",
+    "artifacts/taskr-*.tar.gz"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

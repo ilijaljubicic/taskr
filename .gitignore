@@ -1,12 +1,15 @@
 /target
 
 # Generated npm package artifacts.
-/npm/mmux/artifacts/
-/npm/mmux/*.tgz
+/npm/taskr/artifacts/
+/npm/taskr/*.tgz
+
+# Retained build artifacts from the removed sandbox backend.
+/example-backends/**/.artifacts/
 PLANS
 
 # Local Cormilo orchestration runtime bundle and state.
-mmux-cormilo-agent/
+taskr-cormilo-agent/
 
 # Python / uv build artifacts (tools/ uv packages).
 .venv/

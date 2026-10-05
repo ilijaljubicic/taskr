@@ -1,0 +1,18 @@
+[package]
+name = "taskr-herdr"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["native"]
+native = ["dep:tokio"]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["process"], optional = true }
+
+[[test]]
+name = "protocol_contract"
+required-features = ["native"]
