@@ -21,7 +21,8 @@ NATIVE_VERSION = c.native_version
 class CompanionTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="taskr-bundle-test-")
-        self.root = Path(self.temp.name)
+        # macOS temporary directories can be reached through a symlinked /var.
+        self.root = Path(self.temp.name).resolve(strict=True)
         self.source = self.root / "source/.codex"
         self.source.mkdir(parents=True)
         (self.source / "config.toml").write_text('model = "test-model"\n')

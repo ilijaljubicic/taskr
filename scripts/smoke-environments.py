@@ -21,7 +21,7 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--taskr-bin", default=str(Path(__file__).resolve().parents[1] / "target/debug/taskr"))
 parser.add_argument("--execution-ports", action="store_true", help="Also prove launch, pinned resume, namespace replacement and cleanup using fake Herdr resources")
 args = parser.parse_args()
-root = Path(tempfile.mkdtemp(prefix="taskr-environment-mcp-proof-"))
+root = Path(tempfile.mkdtemp(prefix="taskr-environment-mcp-proof-")).resolve(strict=True)
 user = root / "user"
 source = user / ".codex-work"
 source.mkdir(parents=True)

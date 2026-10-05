@@ -10,8 +10,12 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
-        let root =
-            std::env::temp_dir().join(format!("taskr-environment-test-{}", uuid::Uuid::new_v4()));
+        // macOS exposes its temporary directory through /var -> /private/var.
+        // Fixture paths must satisfy the same no-symlink-root contract as deployments.
+        let root = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("taskr-environment-test-{}", uuid::Uuid::new_v4()));
         let source = root.join("user/.codex");
         std::fs::create_dir_all(&source).unwrap();
         std::fs::write(source.join("config.toml"), "model = 'fixture-model'\n").unwrap();
