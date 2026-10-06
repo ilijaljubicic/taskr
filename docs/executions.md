@@ -12,6 +12,9 @@ restarts.
 - Launches are task-owned. `start_coding_session` requires an existing
   `task_id`; missing, malformed, or unknown task ids are rejected before taskr
   contacts Herdr. **No task, no execution.**
+- Launches and inspection resumes require a profile from an environment assigned
+  to the owning project. Each attempt records its resolved model and reasoning
+  options; resume reuses those settings. See [profile management](profiles.md).
 - Execution phases: `Pending` (launch intent persisted), `Allocating`
   (workspace/tab/pane allocation submitted), `Starting` (agent start
   submitted), `Live` (agent recognized on the endpoint), `Unavailable`
@@ -69,7 +72,8 @@ MCP `execution_resume` recreates a pane in the same plan,
 group, and endpoint using the saved native session and frozen launch settings.
 It can use an execution ID from `task_get.execution_history`. It fails if the
 task already has a live/unresolved execution, the native ID is missing, or the
-original profile is missing, disabled, or selects a different agent kind.
+original profile is missing, disabled, selects a different agent kind, or belongs
+to an environment no longer assigned to the project.
 The owning task must still exist. A resume is an
 explicit inspection: it does not replay a task prompt or change task status,
 and automatic final-task cleanup leaves it open until `execution_stop`.
@@ -86,11 +90,11 @@ is finished; use `include_completed=true` to also list finished task bindings.
 
 Call `execution_resume` on the running controller that owns the task. It opens
 the pane without attaching a terminal client. The saved argument vector and
-environment take precedence
-over later profile or project-home edits. The original profile must still be
-enabled and select the same agent kind. Native configuration, authentication,
-and skills are read from the saved endpoint paths; their file contents are not
-snapshotted by TASKR.
+environment take precedence over later profile or project-home edits. The
+original profile must still be enabled, select the same agent kind, and belong
+to an assigned environment. Resume verifies and reuses the original prepared
+deployment. The native CLI loads configuration, authentication, and skills from
+that saved home.
 
 Each execution's `report` preserves its task status, outcome, and evidence when
 cleanup first runs. Later status updates or fresh attempts can change the task's

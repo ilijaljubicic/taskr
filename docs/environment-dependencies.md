@@ -85,4 +85,27 @@ destination scope. The repository/workspace itself must exist separately on the
 endpoint; Taskr does not transfer it or widen project definitions into user scope.
 Project `.mcp.json` files remain repository-owned.
 
+## Claude plugin dependencies
+
+Configured installed plugins use the same dependency inspection for hooks, MCP
+servers, and LSP commands. A plugin can carry its own `taskr-dependencies.json`
+with `version: 1` and `commands`. Its `config` paths are relative to the plugin
+root; file paths retain the command cwd/configuration-directory rules above.
+For example, a declaration for `hooks/hooks.json` can use
+`/hooks/SessionStart/0/hooks/0` to identify a command hook. A home-level manifest
+can also declare commands by their original installed plugin configuration paths.
+
+Native `${CLAUDE_PLUGIN_ROOT}` references are inspected against the installed
+payload and remain native references in the prepared configuration.
+`${CLAUDE_PLUGIN_DATA}`, `${CLAUDE_PROJECT_DIR}`, and native user-configuration
+references describe runtime inputs; provision those inputs on the endpoint.
+Plugin installers, hooks, and servers are never executed during sync.
+
+The home's `claude_projects` mappings also apply to project/local plugin
+installation records. Such installations retain their original scope. Valid
+homes with missing plugin payloads or project mappings remain discoverable with
+`sync_blockers`; repair the setup and rediscover before syncing. See
+[Claude plugin snapshots](environments.md#claude-plugins) for registry and version
+handling.
+
 See [environment setup](environments.md) for discovery, sync, readiness and launch.

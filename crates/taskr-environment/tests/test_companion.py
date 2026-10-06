@@ -16,9 +16,53 @@ spec = importlib.util.spec_from_file_location("companion", Path(__file__).parent
 c = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(c)
 NATIVE_VERSION = c.native_version
+NATIVE_EFFORTS = c.native_reasoning_efforts
 
 
 class CompanionTests(unittest.TestCase):
+    def test_profile_model_options_follow_its_provider_catalog(self):
+        cache = {"models": [{"slug":"test-model", "supported_reasoning_levels":[{"effort":"high"}]},
+                            {"slug":"fast-model", "supported_reasoning_levels":[{"effort":"low"}]}],
+                 "account_metadata":"must-not-be-published"}
+        (self.source / "models_cache.json").write_text(json.dumps(cache))
+        catalog = self.source / "glm-catalog.json"
+        catalog.write_text(json.dumps({"models":[{"slug":"glm-5.3", "supported_reasoning_levels":[
+            {"effort":"low"},{"effort":"high"},{"effort":"max"}]}]}))
+        (self.source / "glm.config.toml").write_text(
+            'model="glm-5.3"\nmodel_provider="ZAI"\nmodel_reasoning_effort="max"\nmodel_catalog_json="glm-catalog.json"\n')
+        bundle = c.export(self.source, "codex")
+        base, glm = bundle["profile_settings"]
+        self.assertEqual({row["model"] for row in base["model_options"]}, {"test-model","fast-model"})
+        self.assertEqual(glm["native_profile"], "glm")
+        self.assertEqual(glm["model_options"], [{"model":"glm-5.3","reasoning_efforts":["low","high","max"]}])
+        self.assertNotIn("must-not-be-published", json.dumps(bundle["profile_settings"]))
+        self.assertFalse(any(entry["path"].endswith("models_cache.json") for entry in bundle["files"]))
+
+    def test_imported_profile_without_catalog_advertises_only_its_configured_model(self):
+        bundle = c.export(self.source, "codex")
+        self.assertEqual(bundle["profile_settings"][0]["model_options"],
+                         [{"model":"test-model","reasoning_efforts":[]}])
+
+    def test_imported_model_cache_cannot_escape_the_collection(self):
+        external = self.root / "controller-models.json"
+        external.write_text(json.dumps({"models": [{"slug": "controller-only"}]}))
+        (self.source / "models_cache.json").symlink_to(external)
+        discovered = self.imported()
+        self.assertFalse(discovered["environments"])
+        self.assertIn("escapes", discovered["issues"][0]["error"])
+
+    def test_claude_effort_choices_come_from_native_help_and_preserve_api_routing(self):
+        home = self.root / "claude"
+        home.mkdir()
+        (home / "settings.json").write_text(json.dumps({"model":"sonnet", "env":{
+            "ANTHROPIC_BASE_URL":"https://fixture.invalid", "ANTHROPIC_DEFAULT_SONNET_MODEL":"glm-5.3"}}))
+        with patch.object(c.subprocess, "run", return_value=SimpleNamespace(
+                stdout=b"--effort <level> Effort level\n  (low, medium, high, xhigh, max)", returncode=0)):
+            supported = NATIVE_EFFORTS("claude")
+        with patch.object(c, "native_reasoning_efforts", return_value=supported):
+            settings = c.export(home, "claude")["profile_settings"][0]
+        self.assertEqual(settings["model_options"], [{"model":"sonnet","reasoning_efforts":["low","medium","high","xhigh","max"]}])
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="taskr-bundle-test-")
         # macOS temporary directories can be reached through a symlinked /var.
@@ -28,11 +72,14 @@ class CompanionTests(unittest.TestCase):
         (self.source / "config.toml").write_text('model = "test-model"\n')
         self.home_patch = patch.object(Path, "home", return_value=self.root / "user")
         self.version_patch = patch.object(c, "native_version", return_value="0.160.0")
+        self.efforts_patch = patch.object(c, "native_reasoning_efforts", return_value=[])
         self.home_patch.start()
         self.version_patch.start()
+        self.efforts_patch.start()
         self.addCleanup(self.temp.cleanup)
         self.addCleanup(self.home_patch.stop)
         self.addCleanup(self.version_patch.stop)
+        self.addCleanup(self.efforts_patch.stop)
 
     def bundle(self, policy="copy"):
         source = c.export(self.source, "codex")
@@ -93,7 +140,8 @@ class CompanionTests(unittest.TestCase):
         self.assertEqual(env["native_profiles"], ["review"])
         self.assertEqual(env["kind"], "codex")
         self.assertNotIn("never-return-this", json.dumps(result))
-        self.assertNotIn("review-model", json.dumps(result))
+        self.assertEqual(env["profile_settings"][1]["model"], "review-model")
+        self.assertNotIn("files", env)
         self.assertFalse(result["issues"])
 
     def test_retained_mmux_deployment_keeps_frozen_home_and_integrity(self):
@@ -342,7 +390,7 @@ class CompanionTests(unittest.TestCase):
         with self.assertRaisesRegex(c.ProvisionError, "owned"):
             self.prepare(bundle)
 
-    def test_legacy_inline_profiles_and_unsupported_claude_plugins_report_issues(self):
+    def test_legacy_inline_profiles_and_missing_claude_plugins_report_issues(self):
         (self.source / "config.toml").write_text('[profiles.review]\nmodel="test"')
         result = c.discover({"homes": [str(self.source)]})
         self.assertFalse(result["environments"])
@@ -351,8 +399,233 @@ class CompanionTests(unittest.TestCase):
         claude.mkdir()
         (claude / "settings.json").write_text('{"enabledPlugins":{"test@market":true}}')
         result = c.discover({"homes": [str(claude)]})
+        self.assertEqual(len(result["environments"]), 1)
+        self.assertIn("installed_plugins.json", result["environments"][0]["sync_blockers"][0])
+        self.assertIn("installed_plugins.json", result["issues"][0]["error"])
+
+    def claude_plugin_home(self):
+        home = self.root / "source/.claude"
+        root = self.root / "installed-plugin"
+        root.mkdir()
+        (root / ".claude-plugin").mkdir()
+        (root / "scripts").mkdir()
+        (root / "scripts/probe.py").write_text("raise RuntimeError('Plugin commands must never execute during sync')")
+        (root / "skills/proof").mkdir(parents=True)
+        (root / "skills/proof/SKILL.md").write_text("Plugin skill")
+        (root / ".in_use").mkdir()
+        (root / ".in_use/123").write_text("runtime lock")
+        (root / ".claude-plugin/plugin.json").write_text(json.dumps({
+            "name": "probe", "version": "1.0.0", "skills": ["./skills/proof"],
+            "mcpServers": {"probe": {"command": "python3", "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/probe.py"]}},
+            "lspServers": {"probe": {"command": "python3", "extensionToLanguage": {".py": "python"}}}}))
+        (root / "hooks").mkdir()
+        (root / "hooks/hooks.json").write_text(json.dumps({"hooks": {"SessionStart": [
+            {"hooks": [{"type": "command", "command": 'python3 "${CLAUDE_PLUGIN_ROOT}/scripts/probe.py"'}]}]}}))
+        marketplace = self.root / "marketplace"
+        (marketplace / ".claude-plugin").mkdir(parents=True)
+        (marketplace / ".claude-plugin/marketplace.json").write_text(json.dumps({
+            "name": "fixture", "owner": {"name": "Fixture"}, "plugins": [{"name": "probe", "source": "./probe"}]}))
+        (home / "plugins").mkdir(parents=True)
+        (home / "settings.json").write_text(json.dumps({"model": "sonnet", "enabledPlugins": {"probe@fixture": True}}))
+        (home / ".credentials.json").write_text('{"accessToken":"fixture-login"}')
+        (home / "plugins/installed_plugins.json").write_text(json.dumps({"version": 2, "plugins": {"probe@fixture": [
+            {"scope": "user", "installPath": str(root), "version": "1.0.0"}]}}))
+        (home / "plugins/known_marketplaces.json").write_text(json.dumps({"fixture": {
+            "source": {"source": "github", "repo": "fixture/plugins"}, "installLocation": str(marketplace), "autoUpdate": True}}))
+        return home, root, marketplace
+
+    def claude_bundle(self, home, policy="copy"):
+        source = c.export(home, "claude")
+        return c.export_request({"source_home": str(home), "kind": "claude", "source_revision": source["source_revision"], "credential_policy": policy})
+
+    def test_claude_plugins_clone_payload_registry_catalog_and_runtime_root_dependencies(self):
+        home, root, marketplace = self.claude_plugin_home()
+        settings_path = home / "settings.json"
+        settings = json.loads(settings_path.read_text())
+        settings["extraKnownMarketplaces"] = {"fixture": {"source": {"source": "github", "repo": "fixture/plugins"}, "autoUpdate": True}}
+        settings_path.write_text(json.dumps(settings))
+        catalog_path = marketplace / ".claude-plugin/marketplace.json"
+        catalog = json.loads(catalog_path.read_text())
+        catalog.update({"renames": {"old-unselected": "new-unselected"}, "forceRemoveDeletedPlugins": True,
+                        "metadata": {"pluginRoot": "./old-plugin-root", "description": "Preserve display metadata"}})
+        catalog_path.write_text(json.dumps(catalog))
+        original_registry = (home / "plugins/installed_plugins.json").read_bytes()
+        bundle = self.claude_bundle(home)
+        self.assertNotIn("CLAUDE_PLUGIN_ROOT", {d["reference"] for d in bundle["dependencies"] if d["kind"] == "environment"})
+        result = self.prepare(bundle)
+        deployed = Path(result["home"])
+        record = json.loads((deployed / "plugins/installed_plugins.json").read_text())["plugins"]["probe@fixture"][0]
+        plugin = Path(record["installPath"])
+        self.assertTrue(plugin.is_relative_to(deployed))
+        self.assertEqual((plugin / "skills/proof/SKILL.md").read_text(), "Plugin skill")
+        self.assertFalse((plugin / ".in_use").exists())
+        self.assertEqual((home / "plugins/installed_plugins.json").read_bytes(), original_registry)
+        known = json.loads((deployed / "plugins/known_marketplaces.json").read_text())["fixture"]
+        self.assertFalse(known["autoUpdate"])
+        self.assertFalse(json.loads((deployed / "settings.json").read_text())["extraKnownMarketplaces"]["fixture"]["autoUpdate"])
+        self.assertTrue(json.loads(settings_path.read_text())["extraKnownMarketplaces"]["fixture"]["autoUpdate"])
+        catalog = json.loads((Path(known["installLocation"]) / ".claude-plugin/marketplace.json").read_text())
+        self.assertNotIn("renames", catalog)
+        self.assertNotIn("forceRemoveDeletedPlugins", catalog)
+        self.assertEqual(catalog["metadata"], {"description": "Preserve display metadata"})
+        self.assertEqual(Path(known["installLocation"]) / catalog["plugins"][0]["source"], plugin)
+        self.assertTrue(c.verify({"home": str(deployed), "deployment_id": result["deployment_id"]}))
+        (plugin / "hooks/hooks.json").write_text("{}")
+        with self.assertRaisesRegex(c.ProvisionError, "changed"):
+            c.verify({"home": str(deployed), "deployment_id": result["deployment_id"]})
+
+    def test_claude_project_plugin_scope_requires_mapping_and_is_not_promoted(self):
+        home, root, _ = self.claude_plugin_home()
+        registry = {"version": 2, "plugins": {"probe@fixture": [{"scope": "project", "projectPath": "/original/repo", "installPath": str(root), "version": "1"}]}}
+        (home / "plugins/installed_plugins.json").write_text(json.dumps(registry))
+        blocked = c.discover({"homes": [str(home)]})["environments"][0]
+        self.assertIn("mapped project", blocked["sync_blockers"][0])
+        (home / "taskr-dependencies.json").write_text(json.dumps({"version": 1, "claude_projects": {"/original/repo": "/endpoint/repo"}}))
+        result = self.prepare(self.claude_bundle(home))
+        record = json.loads((Path(result["home"]) / "plugins/installed_plugins.json").read_text())["plugins"]["probe@fixture"][0]
+        self.assertEqual(record["scope"], "project")
+        self.assertEqual(record["projectPath"], "/endpoint/repo")
+
+    def test_disabled_claude_plugins_and_uninstalled_marketplace_declarations_do_not_block(self):
+        home = self.root / "claude-disabled"
+        home.mkdir()
+        (home / "settings.json").write_text(json.dumps({"enabledPlugins": {"missing@fixture": False},
+            "extraKnownMarketplaces": {"fixture": {"source": {"source": "github", "repo": "fixture/plugins"}}}}))
+        result = c.discover({"homes": [str(home)]})
+        self.assertFalse(result["issues"])
+        self.assertEqual(len(result["environments"]), 1)
+
+    def test_claude_marketplace_inline_lsp_is_included_and_checked(self):
+        home, root, marketplace = self.claude_plugin_home()
+        (root / ".claude-plugin/plugin.json").unlink()
+        manifest = marketplace / ".claude-plugin/marketplace.json"
+        value = json.loads(manifest.read_text())
+        value["plugins"][0]["lspServers"] = {"probe": {"command": "taskr-nonexistent-fixture-lsp", "extensionToLanguage": {".py": "python"}}}
+        manifest.write_text(json.dumps(value))
+        bundle = self.claude_bundle(home)
+        with self.assertRaisesRegex(c.ProvisionError, "executable is missing"):
+            self.prepare(bundle)
+
+    def test_imported_claude_plugin_payload_cannot_escape_collection(self):
+        home, root, _ = self.claude_plugin_home()
+        result = c.discover({"source_path": str(home), "cache_root": str(self.root / "cache")})
         self.assertFalse(result["environments"])
-        self.assertIn("unsupported", result["issues"][0]["error"])
+        self.assertIn("escapes", result["issues"][0]["error"])
+
+    def test_claude_plugin_metadata_obeys_credential_policy(self):
+        home, root, _ = self.claude_plugin_home()
+        manifest = root / ".claude-plugin/plugin.json"
+        value = json.loads(manifest.read_text())
+        value["mcpServers"]["probe"]["env"] = {"SERVICE_API_KEY": "fixture-private-key"}
+        manifest.write_text(json.dumps(value))
+        with self.assertRaisesRegex(c.ProvisionError, "embeds credentials"):
+            self.claude_bundle(home, "endpoint")
+        result = self.prepare(self.claude_bundle(home, "copy"))
+        self.assertTrue(result["home"])
+
+    def test_missing_claude_plugin_payload_is_visible_with_a_setup_blocker(self):
+        home, root, _ = self.claude_plugin_home()
+        root.rename(root.with_name("removed-plugin"))
+        discovered = c.discover({"homes": [str(home)]})
+        self.assertEqual(len(discovered["environments"]), 1)
+        self.assertIn("payload is missing", discovered["environments"][0]["sync_blockers"][0])
+
+    def test_claude_plugin_dependency_payload_is_cloned_without_changing_enablement(self):
+        home, root, marketplace = self.claude_plugin_home()
+        dependency = self.root / "dependency-plugin"
+        (dependency / "skills/proof").mkdir(parents=True)
+        (dependency / "skills/proof/SKILL.md").write_text("Dependency skill")
+        manifest_path = root / ".claude-plugin/plugin.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["dependencies"] = ["dependency"]
+        manifest_path.write_text(json.dumps(manifest))
+        installed_path = home / "plugins/installed_plugins.json"
+        installed = json.loads(installed_path.read_text())
+        installed["plugins"]["dependency@fixture"] = [{"scope": "user", "installPath": str(dependency), "version": "1"}]
+        installed_path.write_text(json.dumps(installed))
+        catalog_path = marketplace / ".claude-plugin/marketplace.json"
+        catalog = json.loads(catalog_path.read_text())
+        catalog["plugins"].append({"name": "dependency", "source": "./dependency"})
+        catalog_path.write_text(json.dumps(catalog))
+        result = self.prepare(self.claude_bundle(home))
+        deployed = Path(result["home"])
+        registrations = json.loads((deployed / "plugins/installed_plugins.json").read_text())["plugins"]
+        self.assertEqual(set(registrations), {"probe@fixture", "dependency@fixture"})
+        self.assertEqual(json.loads((deployed / "settings.json").read_text())["enabledPlugins"], {"probe@fixture": True})
+
+    def test_claude_exec_hook_arguments_and_native_data_variables_are_preserved(self):
+        home, root, _ = self.claude_plugin_home()
+        (root / "hooks/hooks.json").write_text(json.dumps({"hooks": {"SessionStart": [{"hooks": [
+            {"type": "command", "command": "python3", "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/probe.py", "${CLAUDE_PLUGIN_DATA}/state.json"]}]}]}}))
+        bundle = self.claude_bundle(home)
+        self.assertNotIn("CLAUDE_PLUGIN_DATA", {d["reference"] for d in bundle["dependencies"]})
+        result = self.prepare(bundle)
+        deployed = Path(result["home"])
+        plugin = Path(json.loads((deployed / "plugins/installed_plugins.json").read_text())["plugins"]["probe@fixture"][0]["installPath"])
+        self.assertIn("${CLAUDE_PLUGIN_DATA}", (plugin / "hooks/hooks.json").read_text())
+
+    def test_claude_opaque_plugin_commands_use_plugin_local_dependency_declarations(self):
+        home, root, _ = self.claude_plugin_home()
+        manifest_path = root / ".claude-plugin/plugin.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["mcpServers"]["probe"]["args"] = ["-c", "raise RuntimeError('Must not execute')"]
+        manifest_path.write_text(json.dumps(manifest))
+        with self.assertRaisesRegex(c.ProvisionError, "Opaque"):
+            self.claude_bundle(home)
+        (root / "taskr-dependencies.json").write_text(json.dumps({"version": 1, "commands": [{
+            "config": ".claude-plugin/plugin.json", "pointer": "/mcpServers/probe",
+            "files": [{"path": "../scripts/probe.py"}], "environment": ["TASKR_PLUGIN_FIXTURE_REQUIRED"]}]}))
+        bundle = self.claude_bundle(home)
+        result = self.prepare(bundle)
+        self.assertEqual(result["profile_readiness"][0]["missing_environment"], ["TASKR_PLUGIN_FIXTURE_REQUIRED"])
+
+    def test_claude_plugin_collection_and_zip_import_rebase_original_machine_paths(self):
+        home, root, marketplace = self.claude_plugin_home()
+        collection = self.root / "plugin-collection"
+        collection.mkdir()
+        new_home, new_root, new_market = collection / "claude", collection / "payload", collection / "marketplace"
+        home.rename(new_home)
+        root.rename(new_root)
+        marketplace.rename(new_market)
+        installed_path = new_home / "plugins/installed_plugins.json"
+        installed = json.loads(installed_path.read_text())
+        installed["plugins"]["probe@fixture"][0]["installPath"] = str(new_root)
+        installed_path.write_text(json.dumps(installed))
+        known_path = new_home / "plugins/known_marketplaces.json"
+        known = json.loads(known_path.read_text())
+        known["fixture"]["installLocation"] = str(new_market)
+        known_path.write_text(json.dumps(known))
+        (collection / "taskr-environments.json").write_text(json.dumps({"version": 1, "environments": [{
+            "home": "claude", "kind": "claude", "original_home": str(new_home), "original_user_home": str(collection)}]}))
+        archive = self.root / "plugin-collection.zip"
+        with zipfile.ZipFile(archive, "w") as output:
+            for file in collection.rglob("*"):
+                if file.is_file():
+                    output.write(file, str(file.relative_to(collection)))
+        for location in (collection, archive):
+            discovery = c.discover({"source_path": str(location), "cache_root": str(self.root / "plugin-cache")})
+            self.assertFalse(discovery["issues"])
+            source = discovery["environments"][0]
+            bundle = self.imported_bundle(source)
+            result = self.prepare(bundle)
+            deployed = Path(result["home"])
+            record = json.loads((deployed / "plugins/installed_plugins.json").read_text())["plugins"]["probe@fixture"][0]
+            plugin = Path(record["installPath"])
+            self.assertTrue(plugin.is_relative_to(deployed))
+            self.assertEqual((plugin / "skills/proof/SKILL.md").read_text(), "Plugin skill")
+
+    def test_claude_configured_plugin_registry_root_is_cloned_and_rebased(self):
+        home, _, _ = self.claude_plugin_home()
+        custom = self.root / "custom-plugin-registry"
+        (home / "plugins").rename(custom)
+        settings_path = home / "settings.json"
+        settings = json.loads(settings_path.read_text())
+        settings["env"] = {"CLAUDE_CODE_PLUGIN_CACHE_DIR": str(custom)}
+        settings_path.write_text(json.dumps(settings))
+        result = self.prepare(self.claude_bundle(home))
+        deployed = Path(result["home"])
+        self.assertEqual(json.loads((deployed / "settings.json").read_text())["env"]["CLAUDE_CODE_PLUGIN_CACHE_DIR"], str(deployed / "plugins"))
+        self.assertTrue((deployed / "plugins/installed_plugins.json").is_file())
 
     def test_packaging_size_limit_is_enforced_before_collecting_a_whole_tree(self):
         skills = self.source / "skills"

@@ -560,7 +560,10 @@ async fn folder_import_syncs_profiles_without_controller_user_skills_and_persist
     let raw = std::fs::read(fixture.root.join("store/taskr.db")).unwrap();
     let raw = String::from_utf8_lossy(&raw);
     assert!(!raw.contains("import-login-never-persist"));
-    assert!(!raw.contains("import-base"));
+    // Model names are typed capability metadata; configuration file contents
+    // and credentials remain outside the registry.
+    assert!(!raw.contains("model=\"import-base\""));
+    assert!(raw.contains("profile_settings"));
 }
 
 #[tokio::test]
@@ -594,6 +597,8 @@ async fn discovery_rejects_conflicting_and_empty_sources_before_companion_io() {
 fn invalid_policy_and_relative_endpoint_paths_are_rejected() {
     let fixture = Fixture::new();
     let source = AgentEnvironment {
+        profile_settings: Vec::new(),
+        sync_blockers: Vec::new(),
         source_environment_id: "env-x".into(),
         source_revision: "r".into(),
         source_home: "/source".into(),
@@ -611,4 +616,70 @@ fn invalid_policy_and_relative_endpoint_paths_are_rejected() {
     assert!(validate_sync(&request).is_err());
     request.endpoint_auth_home = Some("relative/home".into());
     assert!(validate_sync(&request).is_err());
+}
+
+#[test]
+fn prepared_claude_launch_fences_both_native_configuration_and_plugin_root() {
+    let deployment: PreparedEnvironment = serde_json::from_value(json!({
+        "deployment_id":"dep-clone", "bundle_digest":"digest", "source_environment_id":"env-claude",
+        "source_revision":"revision", "kind":"claude", "native_profiles":[], "home":"/endpoint/prepared/claude",
+        "cli_version":"2.1.0", "credential_policy":"endpoint", "authentication":"native_provider_config"
+    })).unwrap();
+    let choices = launch_choices("local", &deployment);
+    assert_eq!(choices[0].profile.env["CLAUDE_CONFIG_DIR"], deployment.home);
+    assert_eq!(
+        choices[0].profile.env["CLAUDE_CODE_PLUGIN_CACHE_DIR"],
+        "/endpoint/prepared/claude/plugins"
+    );
+}
+
+#[tokio::test]
+async fn blocked_claude_plugin_setup_remains_discoverable_assignable_and_persisted() {
+    let fixture = Fixture::new();
+    let home = fixture.root.join("user/.claude");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(
+        home.join("settings.json"),
+        r#"{"enabledPlugins":{"missing@fixture":true}}"#,
+    )
+    .unwrap();
+    write_executable(
+        &fixture.root.join("bin/claude"),
+        "#!/bin/sh\nprintf 'claude 2.1.0\\n'\n",
+    );
+    let catalog = fixture.catalog();
+    let discovery = catalog
+        .discover(DiscoveryRequest {
+            homes: Some(vec![home.display().to_string()]),
+            source_path: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(discovery.environments.len(), 1);
+    let source = &discovery.environments[0];
+    assert!(!source.sync_blockers.is_empty());
+    catalog
+        .require_environment(&source.source_environment_id)
+        .unwrap();
+    assert!(
+        !catalog.environments().unwrap()["environments"][0]["sync_blockers"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let error = catalog
+        .sync(fixture.herdr.clone(), fixture.request(source, "local"))
+        .await
+        .unwrap_err();
+    assert!(error.contains("blocked"));
+    assert!(catalog.list("local").unwrap().is_empty());
+    drop(catalog);
+    let reopened = fixture.catalog();
+    reopened
+        .require_environment(&source.source_environment_id)
+        .unwrap();
+    assert_eq!(
+        reopened.environments().unwrap()["environments"][0]["sync_blockers"][0],
+        source.sync_blockers[0]
+    );
 }

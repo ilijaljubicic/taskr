@@ -38,6 +38,56 @@ def overlay(base, override):
     return result
 
 
+def native_reasoning_efforts(kind):
+    efforts = []
+    if kind == "claude":
+        try:
+            help_result = subprocess.run([kind, "--help"], capture_output=True, timeout=15)
+            text = help_result.stdout.decode("utf-8", errors="replace")
+            match = re.search(r"--effort[^\n]*\n?[^\n]*\(([^)]+)\)", text)
+            if match:
+                efforts = [value.strip() for value in match[1].split(",")
+                           if value.strip() in {"low", "medium", "high", "xhigh", "max"}]
+        except (OSError, subprocess.TimeoutExpired):
+            pass  # Imported source versions need not have a controller-local CLI.
+    return efforts
+
+
+def profile_launch_settings(home, kind, config_entries, profiles, resolve):
+    """Non-secret configuration/capability metadata; never calls a provider."""
+    efforts = native_reasoning_efforts(kind)
+    rows = []
+    for name, (path, _, settings) in zip([None, *profiles], config_entries):
+        config = settings if name is None else overlay(config_entries[0][2], settings)
+        model = config.get("model")
+        effort = config.get("model_reasoning_effort") if kind == "codex" else config.get("effortLevel")
+        options = {}
+        if kind == "codex":
+            catalog = None
+            if config.get("model_catalog_json"):
+                catalog = read_config(resolve(config["model_catalog_json"], path.parent))
+            elif config.get("model_provider", "openai") == "openai" and (home / "models_cache.json").is_file():
+                catalog = read_config(resolve(str(home / "models_cache.json")))
+            for item in (catalog or {}).get("models", []):
+                if not isinstance(item, dict) or not isinstance(item.get("slug"), str):
+                    continue
+                options[item["slug"]] = [entry["effort"] for entry in item.get("supported_reasoning_levels", [])
+                                         if isinstance(entry, dict) and isinstance(entry.get("effort"), str)]
+        else:
+            environment = config.get("env", {})
+            model = model or environment.get("ANTHROPIC_MODEL")
+            effort = effort or environment.get("CLAUDE_CODE_EFFORT_LEVEL")
+            for alias in ("haiku", "sonnet", "opus", "fable"):
+                if not environment.get("ANTHROPIC_BASE_URL") or environment.get("ANTHROPIC_DEFAULT_" + alias.upper() + "_MODEL"):
+                    options[alias] = efforts
+        if isinstance(model, str):
+            options.setdefault(model, [effort] if isinstance(effort, str) else efforts)
+        rows.append({"native_profile": name, "model": model, "reasoning_effort": effort,
+                     "model_options": [{"model": value, "reasoning_efforts": supported}
+                                       for value, supported in sorted(options.items())]})
+    return rows
+
+
 def pointer_part(value):
     return value.replace("~", "~0").replace("/", "~1")
 
@@ -54,6 +104,7 @@ class DependencyInventory:
         self.records, self.credentials, self.mappings, self.config_files = [], {}, {}, []
         self.directories = {}
         self.visiting, self.visited = set(), set()
+        self.runtime_configs = set()
         self.effective = {None: configs[0][2]}
         self.effective.update({name: overlay(configs[0][2], config) for name, (_, _, config) in zip(profiles, configs[1:])})
         self.declarations, self.used_declarations, self.project_mappings = {}, set(), {}
@@ -62,20 +113,7 @@ class DependencyInventory:
             value = read_config(checked(manifest))
             if value.get("version") != 1 or set(value) - {"version", "commands", "claude_projects"}:
                 raise ProvisionError("Invalid taskr-dependencies.json manifest")
-            if not isinstance(value.get("commands", []), list) or len(value.get("commands", [])) > MAX_FILES:
-                raise ProvisionError("Invalid command dependency declaration list")
-            for entry in value.get("commands", []):
-                if not isinstance(entry, dict) or set(entry) - {"config", "pointer", "files", "environment"}:
-                    raise ProvisionError("Invalid command dependency declaration")
-                if not isinstance(entry.get("files", []), list) or not isinstance(entry.get("environment", []), list):
-                    raise ProvisionError("Command dependencies must use file and environment lists")
-                config = entry.get("config", "")
-                if not isinstance(config, str) or not config or PurePosixPath(config).is_absolute() or ".." in PurePosixPath(config).parts:
-                    raise ProvisionError("Dependency declarations require a home-relative config")
-                key = (config, entry.get("pointer", ""))
-                if not isinstance(key[1], str) or not key[1].startswith("/") or key in self.declarations:
-                    raise ProvisionError("Invalid or duplicate command dependency pointer")
-                self.declarations[key] = entry
+            self.add_commands(value)
             self.project_mappings = value.get("claude_projects", {})
             if not isinstance(self.project_mappings, dict) or any(
                     not isinstance(k, str) or not isinstance(v, str) or not k.startswith("/") or not v.startswith("/")
@@ -84,6 +122,22 @@ class DependencyInventory:
             if len(set(self.project_mappings.values())) != len(self.project_mappings):
                 raise ProvisionError("Claude project mappings must not merge scopes")
             files.append(file_entry(checked(manifest), "home/taskr-dependencies.json"))
+
+    def add_commands(self, value, prefix=""):
+        if not isinstance(value.get("commands", []), list) or len(value.get("commands", [])) > MAX_FILES:
+            raise ProvisionError("Invalid command dependency declaration list")
+        for entry in value.get("commands", []):
+            if not isinstance(entry, dict) or set(entry) - {"config", "pointer", "files", "environment"}:
+                raise ProvisionError("Invalid command dependency declaration")
+            if not isinstance(entry.get("files", []), list) or not isinstance(entry.get("environment", []), list):
+                raise ProvisionError("Command dependencies must use file and environment lists")
+            config = entry.get("config", "")
+            if not isinstance(config, str) or not config or PurePosixPath(config).is_absolute() or ".." in PurePosixPath(config).parts:
+                raise ProvisionError("Dependency declarations require a home-relative config")
+            key = (prefix + config, entry.get("pointer", ""))
+            if not isinstance(key[1], str) or not key[1].startswith("/") or key in self.declarations:
+                raise ProvisionError("Invalid or duplicate command dependency pointer")
+            self.declarations[key] = entry
 
     def destination(self, path):
         for directory in sorted(self.directories, key=lambda p: len(p.parts), reverse=True):
@@ -142,11 +196,13 @@ class DependencyInventory:
             cwd = value.get("cwd")
             command_env = value.get("env", {})
             if context == "hooks":
+                if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
+                    raise ProvisionError("Invalid native hook arguments")
                 try:
                     words = shlex.split(program)
                 except (ValueError, TypeError):
                     raise ProvisionError("Invalid native hook command")
-                program, args = (words[0] if words else None), words[1:]
+                program, args = (words[0] if words else None), words[1:] + args
         elif isinstance(value, list):
             program, args, cwd, command_env = (value[0] if value else None), value[1:], None, {}
         else:
@@ -208,6 +264,8 @@ class DependencyInventory:
             script_index = next((i for i, a in enumerate(args) if not a.startswith("-")), None) if name in HOOK_INTERPRETERS else None
             for i, arg in enumerate(args):
                 reference = arg.split("=", 1)[1] if arg.startswith("--") and "=" in arg else arg
+                if path in self.runtime_configs and reference.startswith(("${CLAUDE_PLUGIN_DATA}", "${CLAUDE_PROJECT_DIR}", "${user_config.")):
+                    continue  # Native runtime/user configuration, not source files.
                 if "://" in reference or reference.startswith("-"):
                     continue
                 script = i == script_index and name in HOOK_INTERPRETERS
@@ -246,10 +304,10 @@ class DependencyInventory:
             profiles = self.active_profiles(destination, pointer, inherited if inherited is not None else list(self.effective))
             if isinstance(value, dict):
                 if "command" in value and isinstance(value["command"], str) and (
-                        context in {"mcp_servers", "mcpServers", "auth", "hooks"}):
+                        context in {"mcp_servers", "mcpServers", "lspServers", "auth", "hooks"}):
                     self.command(value, path, destination, pointer, profiles, auth=context == "auth", context=context)
                 for name, child in value.items():
-                    child_context = name if name in {"mcp_servers", "mcpServers", "auth", "hooks", "env_http_headers"} else context
+                    child_context = name if name in {"mcp_servers", "mcpServers", "lspServers", "auth", "hooks", "env_http_headers"} else context
                     child_pointer = pointer + "/" + pointer_part(name)
                     if name in PATH_KEYS and isinstance(child, str):
                         nested, relative = self.collect(child, path.parent, destination, profiles, "configuration")
@@ -266,6 +324,8 @@ class DependencyInventory:
                     visit(child, pointer + "/" + str(index), context)
             elif isinstance(value, str) and context != "env_http_headers":
                 for variable in re.findall(r"\$\{(?:env:)?([A-Za-z_][A-Za-z0-9_]*)\}", value):
+                    if path in self.runtime_configs and variable in {"CLAUDE_PLUGIN_ROOT", "CLAUDE_PLUGIN_DATA", "CLAUDE_PROJECT_DIR"}:
+                        continue
                     self.record("environment", variable, profiles, context or "configuration")
         visit(config)
         self.visiting.remove(path)
@@ -283,6 +343,216 @@ class DependencyInventory:
 
 class ProvisionError(Exception):
     pass
+
+
+class EnvironmentSetupError(ProvisionError):
+    """A valid native home whose dependencies need endpoint setup."""
+
+
+class PluginProvisionError(EnvironmentSetupError):
+    """A valid Claude home whose installed plugin setup needs repair."""
+
+
+def json_entry(value, destination):
+    raw = json.dumps(value, ensure_ascii=False, sort_keys=True).encode()
+    return {"path": "home/" + destination, "data": base64.b64encode(raw).decode(),
+            "sha256": hashlib.sha256(raw).hexdigest(), "executable": False}
+
+
+def plugin_root_values(value, root):
+    """Resolve native plugin-root references for inspection, never execution."""
+    if isinstance(value, dict):
+        return {key: plugin_root_values(child, root) for key, child in value.items()}
+    if isinstance(value, list):
+        return [plugin_root_values(child, root) for child in value]
+    if isinstance(value, str):
+        return value.replace("${CLAUDE_PLUGIN_ROOT}", str(root)).replace("$CLAUDE_PLUGIN_ROOT/", str(root) + "/")
+    return value
+
+
+def claude_plugins(home, config, files, inventory, checked, resolve, boundary, path_mappings):
+    """Clone configured installed plugins and a pinned native marketplace catalog.
+
+    Payloads live below the marketplace snapshot; installation records point at
+    those exact roots. No downloads, installation commands, or plugin code run.
+    Unmapped project/local installations never become user installations.
+    """
+    enabled = config.get("enabledPlugins", {})
+    if not isinstance(enabled, dict) or any(not isinstance(value, bool) for value in enabled.values()):
+        raise ProvisionError("Invalid Claude enabledPlugins configuration")
+    pending = sorted(name for name, active in enabled.items() if active)
+    if not pending:
+        return {}
+    configured_root = config.get("env", {}).get("CLAUDE_CODE_PLUGIN_CACHE_DIR")
+    registry_root = resolve(configured_root) if configured_root else home / "plugins"
+    path_mappings[str(registry_root)] = "plugins"
+    installed_path = registry_root / "installed_plugins.json"
+    if not installed_path.is_file():
+        raise PluginProvisionError("Claude enabled plugins have no installed_plugins.json; install them in this source home")
+    installed = read_config(checked(installed_path))
+    if installed.get("version") != 2 or not isinstance(installed.get("plugins"), dict):
+        raise PluginProvisionError("Claude installed plugin registry needs the native version-2 format")
+    known_path = registry_root / "known_marketplaces.json"
+    known = read_config(checked(known_path)) if known_path.is_file() else {}
+    selected, markets, plugin_configs = {}, {}, {}
+
+    def installed_path(value):
+        try:
+            return resolve(value)
+        except ProvisionError as error:
+            if "escapes" in str(error):
+                raise
+            raise PluginProvisionError("Claude installed plugin or marketplace payload is missing at the source") from error
+
+    def scan_plugin(root, destination, entry):
+        manifest_path = root / ".claude-plugin/plugin.json"
+        own = read_config(checked(manifest_path)) if manifest_path.is_file() else None
+        manifest = dict(own if own is not None else entry)
+        component_keys = {"commands", "agents", "skills", "hooks", "outputStyles", "themes"}
+        if own is not None:
+            if not entry.get("strict", True) and any(key in entry for key in component_keys):
+                raise PluginProvisionError("Claude plugin has conflicting cache and marketplace component declarations")
+            for key in component_keys & entry.keys():
+                if key == "hooks" or key not in manifest:
+                    manifest[key] = entry[key]
+                else:
+                    first, second = manifest[key], entry[key]
+                    manifest[key] = (first if isinstance(first, list) else [first]) + (second if isinstance(second, list) else [second])
+        scan_path = manifest_path if own is not None else markets[entry['_market']]['manifest_path']
+        scan_relative = destination + "/.claude-plugin/plugin.json" if own is not None else markets[entry['_market']]['manifest_relative']
+
+        def scan_file(path, context):
+            path = checked(path)
+            if not path.is_relative_to(root):
+                raise ProvisionError("Claude plugin component escapes its plugin root")
+            relative = destination + "/" + str(path.relative_to(root))
+            data = read_config(path)
+            inventory.runtime_configs.add(path)
+            if context in {"mcpServers", "lspServers"} and context not in data:
+                data = {context: data}
+            inventory.scan(path, relative, plugin_root_values(data, root))
+            plugin_configs[relative] = destination
+
+        for relative, context in [("hooks/hooks.json", "hooks"), (".mcp.json", "mcpServers"), (".lsp.json", "lspServers")]:
+            path = root / relative
+            if path.is_file():
+                scan_file(path, context)
+        inline = {}
+        for key in ("skills", "commands", "agents", "outputStyles", "themes", "hooks", "mcpServers", "lspServers"):
+            values = manifest.get(key, [])
+            for value in values if isinstance(values, list) else [values]:
+                if isinstance(value, str):
+                    path = resolve(value, root)
+                    if not path.is_relative_to(root):
+                        raise ProvisionError("Claude plugin component escapes its plugin root")
+                    if key in {"hooks", "mcpServers", "lspServers"}:
+                        scan_file(path, key)
+                elif isinstance(value, dict) and key in {"hooks", "mcpServers", "lspServers"}:
+                    inline.setdefault(key, {}).update(value)
+        if inline:
+            # One marketplace can describe several plugins; inspect each in its
+            # own root context instead of deduplicating on the catalog path.
+            inventory.visited.discard((scan_path, ()))
+            inventory.runtime_configs.add(scan_path)
+            inventory.scan(scan_path, scan_relative, plugin_root_values(inline, root))
+            if own is not None:
+                plugin_configs[scan_relative] = destination
+        return manifest
+
+    while pending:
+        identifier = pending.pop(0)
+        if identifier in selected:
+            continue
+        if enabled.get(identifier) is False:
+            raise PluginProvisionError("A required Claude plugin dependency is explicitly disabled: " + identifier)
+        parts = identifier.split("@")
+        if len(parts) != 2 or any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", part) or ".." in part for part in parts):
+            raise ProvisionError("Invalid Claude plugin identifier")
+        name, market = parts
+        records = installed["plugins"].get(identifier, [])
+        if not isinstance(records, list):
+            raise PluginProvisionError("Invalid Claude installed plugin record")
+        scoped = []
+        for record in records:
+            if not isinstance(record, dict):
+                raise PluginProvisionError("Invalid Claude installed plugin record")
+            scope = record.get("scope")
+            if scope == "user":
+                scoped.append(dict(record))
+            elif scope in {"project", "local"}:
+                target = inventory.project_mappings.get(record.get("projectPath"))
+                if target:
+                    scoped.append({**record, "projectPath": target})
+            else:
+                raise PluginProvisionError("Unknown Claude plugin installation scope")
+        if not scoped:
+            raise PluginProvisionError("Claude enabled plugin '" + identifier + "' has no installed user payload or explicitly mapped project installation")
+        if market not in markets:
+            registration = known.get(market)
+            if not isinstance(registration, dict) or not isinstance(registration.get("installLocation"), str):
+                raise PluginProvisionError("Claude plugin marketplace '" + market + "' is not installed in this source home")
+            marketplace_root = installed_path(registration["installLocation"])
+            manifest_path = checked(marketplace_root / ".claude-plugin/marketplace.json")
+            catalog = read_config(manifest_path)
+            if catalog.get("name") != market or not isinstance(catalog.get("plugins"), list):
+                raise PluginProvisionError("Claude plugin marketplace identity or entries are invalid")
+            relative = "plugins/marketplaces/" + market
+            path_mappings[str(marketplace_root)] = relative
+            inventory.directories[marketplace_root] = relative
+            markets[market] = {"registration": registration, "catalog": catalog, "entries": [],
+                              "manifest_path": manifest_path, "manifest_relative": relative + "/.claude-plugin/marketplace.json"}
+        catalog = markets[market]
+        matches = [entry for entry in catalog["catalog"]["plugins"] if isinstance(entry, dict) and entry.get("name") == name]
+        if len(matches) != 1:
+            raise PluginProvisionError("Claude installed plugin '" + identifier + "' needs one matching marketplace entry")
+        entry = dict(matches[0])
+        selected[identifier] = []
+        for record in scoped:
+            if not isinstance(record.get("installPath"), str):
+                raise PluginProvisionError("Claude plugin installation has no payload path")
+            root = installed_path(record["installPath"])
+            if not root.is_dir():
+                raise PluginProvisionError("Claude plugin installation payload is missing")
+            destination = "plugins/marketplaces/" + market + "/plugins/" + name + "/" + digest(str(root))[:16]
+            path_mappings[record["installPath"]] = destination
+            path_mappings[str(root)] = destination
+            inventory.directories[root] = destination
+            if root.is_relative_to(home):
+                old_prefix = str(root.relative_to(home)) + "/"
+                for key in list(inventory.declarations):
+                    if key[0].startswith(old_prefix):
+                        replacement = (destination + "/" + key[0][len(old_prefix):], key[1])
+                        if replacement in inventory.declarations:
+                            raise ProvisionError("Duplicate plugin dependency declaration")
+                        inventory.declarations[replacement] = inventory.declarations.pop(key)
+            declarations = root / "taskr-dependencies.json"
+            if declarations.is_file():
+                value = read_config(checked(declarations))
+                if value.get("version") != 1 or set(value) - {"version", "commands"}:
+                    raise ProvisionError("Invalid plugin taskr-dependencies.json manifest")
+                inventory.add_commands(value, destination + "/")
+            files.extend(tree_files(root, "home/" + destination, boundary))
+            manifest = scan_plugin(root, destination, {**entry, "_market": market})
+            selected[identifier].append(record)
+            if not any(e["name"] == name for e in catalog["entries"]):
+                catalog["entries"].append({**entry, "version": record.get("version", entry.get("version", "unknown")),
+                                           "source": "./plugins/" + name + "/" + digest(str(root))[:16]})
+            for dependency in manifest.get("dependencies", []):
+                value = dependency.get("name") if isinstance(dependency, dict) else dependency
+                if not isinstance(value, str):
+                    raise PluginProvisionError("Invalid Claude plugin dependency")
+                pending.append(value if "@" in value else value + "@" + market)
+    files.append(json_entry({"version": 2, "plugins": selected}, "plugins/installed_plugins.json"))
+    registrations = {}
+    for name, market in markets.items():
+        catalog = {key: value for key, value in market["catalog"].items()
+                   if key not in {"renames", "forceRemoveDeletedPlugins"}}
+        if isinstance(catalog.get("metadata"), dict):
+            catalog["metadata"] = {key: value for key, value in catalog["metadata"].items() if key != "pluginRoot"}
+        files.append(json_entry({**catalog, "plugins": market["entries"]}, market["manifest_relative"]))
+        registrations[name] = {**market["registration"], "autoUpdate": False}
+    files.append(json_entry(registrations, "plugins/known_marketplaces.json"))
+    return plugin_configs
 
 
 class BundleFiles(list):
@@ -429,7 +699,7 @@ def tree_files(root, destination, boundary=None):
             raise ProvisionError("A selected environment contains a symlink cycle")
         if resolved.is_dir():
             for child in sorted(path.iterdir()):
-                if child.name in {".git", "__pycache__", ".DS_Store", "sessions", "archived_sessions", "logs", *AUTH_FILES.values()}:
+                if child.name in {".git", "__pycache__", ".DS_Store", ".in_use", "sessions", "archived_sessions", "logs", *AUTH_FILES.values()}:
                     continue
                 visit(child, relative / child.name, parents | {resolved})
         elif resolved.is_file():
@@ -532,11 +802,9 @@ def export(home, kind, source=None):
                     path_mappings[str(marketplace_source)] = destination
                     path_mappings[marketplace["source"]] = destination
                     files.append(file_entry(checked(manifest), "home/" + destination + "/.agents/plugins/marketplace.json"))
-    elif any(c.get("enabledPlugins") or c.get("extraKnownMarketplaces") for c in configs):
-        # Claude installation records can mix project and user scopes. Refuse
-        # incomplete clones rather than silently losing enabled plugins.
-        raise ProvisionError("Claude plugin cloning is unsupported; provision a plugin-free source or its dependencies first")
     inventory = DependencyInventory(home, source, files, checked, dependency_path, config_entries, profiles)
+    plugin_configs = claude_plugins(home, config, files, inventory, checked, dependency_path, boundary, path_mappings) if kind == "claude" else {}
+    plugin_dependencies = list(inventory.records)
     if kind == "claude":
         registry = home / ".claude.json"
         if not registry.exists() and not source and home == Path.home() / ".claude":
@@ -547,7 +815,7 @@ def export(home, kind, source=None):
             for project, settings in native.get("projects", {}).items():
                 target = inventory.project_mappings.get(project)
                 if not target:
-                    raise ProvisionError("Claude project MCP definitions require an explicit project path mapping")
+                    raise EnvironmentSetupError("Claude project MCP definitions require an explicit project path mapping")
                 sanitized.setdefault("projects", {})[target] = settings
             raw = json.dumps(sanitized).encode()
             files.append({"path": "home/.claude.json", "data": base64.b64encode(raw).decode(),
@@ -560,11 +828,11 @@ def export(home, kind, source=None):
         relative = str(PurePosixPath(entry["path"]).relative_to("home"))
         if relative not in inventory.config_files and PurePosixPath(relative).name in {"hooks.json", ".mcp.json"}:
             path = home / relative
-            if path.is_file():
+            if path.is_file() and relative not in plugin_configs:
                 inventory.scan(path, relative)
     # Derive prerequisites from each fully overlaid profile, so an override of
     # a provider helper, MCP command or env_key does not retain base requirements.
-    inventory.records = []
+    inventory.records = plugin_dependencies
     inventory.visited = set()
     inventory.effective_scan = True
     for name, effective in inventory.effective.items():
@@ -602,6 +870,8 @@ def export(home, kind, source=None):
                      "dependencies": inventory.records, "config_mappings": inventory.mappings,
                      "credential_files": inventory.credentials,
                      "files": [{k: f[k] for k in ("path", "sha256", "executable")} for f in files]}
+    settings = profile_launch_settings(home, kind, config_entries, profiles, dependency_path)
+    revision_data["profile_settings"] = settings
     if source:
         revision_data["source"] = source
     revision = digest(revision_data)
@@ -616,6 +886,7 @@ def export(home, kind, source=None):
             "source_environment_id": "env-" + digest([kind, source["kind"], source["path"], source["relative_home"]] if source else [kind, str(home)])[:24], "files": files,
             "path_mappings": path_mappings, "config_mappings": inventory.mappings,
             "dependencies": inventory.records, "credential_files": inventory.credentials,
+            "profile_settings": settings, "plugin_configs": plugin_configs,
             "config_files": sorted(set(inventory.config_files)),
             "native_login_required": any(
                 ((c.get("model_provider", "openai") == "openai" and not any(
@@ -889,10 +1160,29 @@ def discover(request):
         try:
             bundle = export(home, kind, source)
             environment = {k: bundle[k] for k in ("source_environment_id", "source_home", "display_name",
-                "source_revision", "kind", "cli_version", "native_profiles", "dependencies")}
+                "source_revision", "kind", "cli_version", "native_profiles", "dependencies", "profile_settings")}
             if source:
                 environment["source_location"] = source
             environments.append(environment)
+        except EnvironmentSetupError as error:
+            # Assignment is a domain choice, not a claim that files can already
+            # be deployed. Keep valid homes visible with their concrete blocker.
+            config_path = home / "settings.json"
+            config = read_config(config_path)
+            version = (source or {}).get("cli_version") or native_version(kind)
+            identity = [kind, source["kind"], source["path"], source["relative_home"]] if source else [kind, str(home)]
+            label = (source or {}).get("name") or (home.parent.name + "/.claude" if home.name == ".claude" and home.parent.name.startswith(".claude") else home.name)
+            settings = profile_launch_settings(home, kind, [(config_path, "settings.json", config)], [], lambda value, base=None: home / value)
+            environment = {"source_environment_id": "env-" + digest(identity)[:24],
+                           "source_home": str(home), "display_name": kind + " / " + label,
+                           "kind": kind, "cli_version": version, "native_profiles": [], "dependencies": [],
+                           "profile_settings": settings, "sync_blockers": [str(error)],
+                           "source_revision": digest([identity, file_hash(config_path, MAX_BYTES), str(error)])}
+            if source:
+                environment["source_location"] = source
+            environments.append(environment)
+            issues.append({"source_environment_id": environment["source_environment_id"],
+                           "source_home": str(home), "error": str(error)})
         except (ProvisionError, OSError) as error:
             if isinstance(error, OSError):
                 error = ProvisionError("Source environment is missing or unreadable")
@@ -1115,6 +1405,11 @@ def prepare(request):
     seen = set()
     contents = []
     configs = []
+    pinned_marketplaces = set()
+    if bundle["kind"] == "claude":
+        for entry in bundle["files"]:
+            if entry["path"] == "home/plugins/known_marketplaces.json":
+                pinned_marketplaces.update(json.loads(base64.b64decode(entry["data"])))
     credential_paths = set(bundle.get("credential_files", {})) | {auth_name}
     for entry in bundle["files"]:
         member = safe_member(entry["path"])
@@ -1129,12 +1424,18 @@ def prepare(request):
         relative = str(member.relative_to("home"))
         if relative not in credential_paths and destination.suffix in {".toml", ".json", ".md", ".sh", ".py", ".js", ".mjs", ".cjs"}:
             raw = adapt_text(raw.decode(), bundle, final, destination.suffix, relative).encode()
+        if bundle["kind"] == "claude" and relative == "settings.json":
+            settings = json.loads(raw)
+            for name, declaration in settings.get("extraKnownMarketplaces", {}).items():
+                if name in pinned_marketplaces and isinstance(declaration, dict):
+                    declaration["autoUpdate"] = False
+            raw = json.dumps(settings, ensure_ascii=False, indent=2).encode()
         if relative in bundle.get("config_files", []) and member.suffix == ".toml":
-            configs.append(tomllib.loads(raw.decode()))
+            configs.append((tomllib.loads(raw.decode()), relative))
         elif member.name == "config.toml" or member.name.endswith(".config.toml"):
-            configs.append(tomllib.loads(raw.decode()))
+            configs.append((tomllib.loads(raw.decode()), relative))
         elif relative in bundle.get("config_files", []) or member.name in {"settings.json", "hooks.json"}:
-            configs.append(json.loads(raw.decode()))
+            configs.append((json.loads(raw.decode()), relative))
         contents.append((member, raw, entry["executable"]))
     for relative, raw in endpoint_credentials.items():
         if "home/" + relative in seen:
@@ -1146,13 +1447,23 @@ def prepare(request):
     included = {str(member.relative_to("home")) for member, _, _ in contents}
     dependencies = bundle.get("dependencies", [])
     preflight_dependencies(dependencies, final, included, all_profiles=True)
-    for settings in configs:
+    for settings, relative in configs:
+        if relative in bundle.get("plugin_configs", {}):
+            settings = plugin_root_values(settings, final / bundle["plugin_configs"][relative])
         validate_dependencies(settings, final, included, request.get("remote", False))
     readiness = [{"native_profile": name,
                   "missing_environment": preflight_dependencies(dependencies, final, included, selected=name)}
                  for name in [None, *bundle["native_profiles"]]]
     for entry in readiness:
         entry["state"] = "blocked" if entry["missing_environment"] else "ready"
+    profile_settings = json.loads(json.dumps(bundle.get("profile_settings", [])))
+    if bundle["kind"] == "claude":
+        # Capability flags belong to the destination CLI, including imports
+        # whose declared source version differs from the controller's CLI.
+        supported = native_reasoning_efforts("claude")
+        for settings in profile_settings:
+            for option in settings.get("model_options", []):
+                option["reasoning_efforts"] = supported
     policy = bundle["credential_policy"]
     # Copy policy may use provider credentials embedded in config rather than a
     # login file. Readiness does not claim provider connectivity or authorization.
@@ -1163,6 +1474,7 @@ def prepare(request):
               "native_profiles": bundle["native_profiles"], "home": str(final),
               "cli_version": version, "credential_policy": policy,
               "dependencies": dependencies, "profile_readiness": readiness,
+              "profile_settings": profile_settings,
               "authentication": "file_provisioned" if auth is not None or "home/" + auth_name in seen else "native_provider_config"}
     if final.exists():
         previous = verify({"home": str(final), "deployment_id": deployment_id, "preparing": True})

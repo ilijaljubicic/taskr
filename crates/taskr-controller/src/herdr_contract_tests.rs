@@ -123,11 +123,152 @@ async fn launch_catalog_is_endpoint_scoped_and_requires_canonical_endpoint_argum
 }
 
 #[tokio::test]
+async fn unassigned_environment_and_blank_profile_refuse_before_runtime_io() {
+    let (mut state, _, task_id) = seeded_state();
+    state
+        .projects
+        .values_mut()
+        .next()
+        .unwrap()
+        .environment_ids
+        .clear();
+    let fixture = Fixture::new(state, Observation::EmptyEndpoint).await;
+    let result = fixture.server.start_coding_session_tool(Some(&json!({
+        "task_id":task_id.0, "endpoint_id":"local", "launch_profile_id":"codex", "workspace_path":"/workspace"
+    }))).await.unwrap();
+    assert_eq!(result.is_error, Some(true));
+    assert!(fixture.calls().is_empty());
+    let project_id = fixture
+        .server
+        .orchestration
+        .snapshot()
+        .unwrap()
+        .projects
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
+    let result = fixture
+        .server
+        .list_launch_profiles_tool(Some(&json!({
+            "endpoint_id":"local", "project_id":project_id.0
+        })))
+        .await
+        .unwrap()
+        .structured_content
+        .unwrap();
+    assert_eq!(result["profiles"], json!([]));
+
+    let (state, _, task_id) = seeded_state();
+    let mut fixture = Fixture::new(state, Observation::EmptyEndpoint).await;
+    fixture.server.launch_profiles = ResolvedLaunchProfiles::in_memory(
+        vec![profiles().list("local").unwrap().remove(0)],
+        CompanionConfig::default(),
+    );
+    let result = fixture.server.start_coding_session_tool(Some(&json!({
+        "task_id":task_id.0, "endpoint_id":"local", "launch_profile_id":"", "workspace_path":"/workspace"
+    }))).await.unwrap();
+    assert_eq!(result.is_error, Some(true));
+    assert!(fixture.calls().is_empty());
+}
+
+#[tokio::test]
+async fn assigning_an_unknown_environment_leaves_project_unchanged() {
+    let (state, _, _) = seeded_state();
+    let id = state.projects.keys().next().unwrap().clone();
+    let fixture = Fixture::new_with_admin(state, Observation::EmptyEndpoint, true).await;
+    let result = fixture
+        .server
+        .project_update_tool(Some(&json!({
+            "project_id":id.0, "environment_ids":["env-not-discovered"]
+        })))
+        .await;
+    assert!(result.is_err());
+    assert_eq!(
+        fixture.server.orchestration.snapshot().unwrap().projects[&id].environment_ids,
+        ["env-fixture"]
+    );
+    assert!(fixture.calls().is_empty());
+}
+
+#[test]
+fn model_and_effort_options_are_profile_scoped_and_do_not_mutate_the_profile() {
+    let mut choice = profiles().list("local").unwrap().remove(0);
+    choice.deployment = Some(taskr_environment::PreparedEnvironment {
+        deployment_id: "dep-options".into(),
+        bundle_digest: "digest".into(),
+        source_environment_id: "env-fixture".into(),
+        source_revision: "revision".into(),
+        kind: "codex".into(),
+        display_name: "Fixture".into(),
+        native_profiles: vec![],
+        home: "/fixture".into(),
+        cli_version: "0.160.0".into(),
+        credential_policy: "endpoint".into(),
+        authentication: "file_provisioned".into(),
+        dependencies: vec![],
+        profile_readiness: vec![],
+        profile_settings: vec![taskr_environment::protocol::ProfileSettings {
+            native_profile: None,
+            model: Some("glm-5.3".into()),
+            reasoning_effort: Some("max".into()),
+            model_options: vec![taskr_environment::protocol::ModelOption {
+                model: "glm-5.3".into(),
+                reasoning_efforts: vec!["low".into(), "high".into(), "max".into()],
+            }],
+        }],
+    });
+    let before = choice.profile.clone();
+    for kind in ["codex", "claude"] {
+        choice.profile.agent_kind = kind.into();
+        let mut args = choice.profile.args.clone();
+        let resolved = resolve_launch_options(
+            &choice,
+            &AgentLaunchOptions {
+                model: Some("glm-5.3".into()),
+                reasoning_effort: Some("high".into()),
+            },
+            &mut args,
+        )
+        .unwrap();
+        assert_eq!(resolved.reasoning_effort.as_deref(), Some("high"));
+        assert!(args.windows(2).any(|pair| pair == ["--model", "glm-5.3"]));
+        if kind == "codex" {
+            assert!(args
+                .windows(2)
+                .any(|pair| pair == ["-c", "model_reasoning_effort=\"high\""]));
+        } else {
+            assert!(args.windows(2).any(|pair| pair == ["--effort", "high"]));
+        }
+        assert!(resolve_launch_options(
+            &choice,
+            &AgentLaunchOptions {
+                model: Some("unadvertised-model".into()),
+                reasoning_effort: None
+            },
+            &mut Vec::new()
+        )
+        .is_err());
+        assert!(resolve_launch_options(
+            &choice,
+            &AgentLaunchOptions {
+                model: None,
+                reasoning_effort: Some("xhigh".into())
+            },
+            &mut Vec::new()
+        )
+        .is_err());
+        assert_eq!(choice.profile.args, before.args);
+    }
+}
+
+#[tokio::test]
 async fn missing_prepared_environment_refuses_start_before_any_herdr_allocation() {
     let (state, _, task_id) = seeded_state();
     let mut fixture = Fixture::new(state, Observation::EmptyEndpoint).await;
     let home = fixture.dir.0.join("missing-home").display().to_string();
     let deployment = taskr_environment::PreparedEnvironment {
+        profile_settings: Vec::new(),
         deployment_id: "dep-fixture".into(),
         bundle_digest: "fixture-revision".into(),
         source_environment_id: "env-fixture".into(),
@@ -144,6 +285,7 @@ async fn missing_prepared_environment_refuses_start_before_any_herdr_allocation(
     };
     fixture.server.launch_profiles = ResolvedLaunchProfiles::in_memory(
         vec![taskr_environment::LaunchChoice {
+            source_environment_id: "env-fixture".into(),
             endpoint_id: "local".into(),
             profile: LaunchProfile {
                 id: "codex".into(),
@@ -499,6 +641,7 @@ fn profiles() -> Arc<ResolvedLaunchProfiles> {
     for endpoint in ["local", "remote-a"] {
         for kind in ["codex", "claude", "opencode", "kimi"] {
             choices.push(taskr_environment::LaunchChoice {
+                source_environment_id: "env-fixture".into(),
                 endpoint_id: endpoint.into(),
                 deployment: None,
                 native_profile: None,
@@ -518,6 +661,7 @@ fn profiles() -> Arc<ResolvedLaunchProfiles> {
 
 fn task_input(plan_id: PlanId, title: &str) -> CreateTask {
     CreateTask {
+        launch_hints: Default::default(),
         plan_id,
         title: title.into(),
         objective: format!("Perform {title}"),
@@ -536,6 +680,7 @@ fn seeded_state() -> (OrchestrationState, PlanId, TaskId) {
             CreateProject {
                 title: "Herdr contracts".into(),
                 description: "Isolated regression fixture".into(),
+                environment_ids: vec!["env-fixture".into()],
                 codex_home: Some("/remote/homes/codex".into()),
                 claude_home: Some("/remote/homes/claude".into()),
                 opencode_home: Some("/remote/homes/opencode".into()),
@@ -565,6 +710,7 @@ fn seeded_state() -> (OrchestrationState, PlanId, TaskId) {
 
 fn execution(phase: ExecutionPhase) -> TaskExecution {
     TaskExecution {
+        launch_options: Default::default(),
         native_session_name: None,
         group: taskr_core::orchestration::ExecutionGroup::Work,
         inspection: false,
@@ -1393,6 +1539,7 @@ async fn descriptive_task_kind_and_skills_survive_each_agent_preset() {
     let fixture = Fixture::new(state.clone(), Observation::IdleAgent).await;
     for agent_kind in ["codex", "claude", "opencode", "kimi"] {
         let request = ResolvedLaunchRequest {
+            launch_options: Default::default(),
             template: None,
             endpoint_id: "remote-a".into(),
             launch_profile_id: agent_kind.into(),
@@ -1429,6 +1576,7 @@ async fn run_spec_descriptive_kind_survives_frozen_launch_intent() {
     let (state, _, task_id) = seeded_state();
     let fixture = Fixture::new(state.clone(), Observation::IdleAgent).await;
     let run_spec = TaskRunSpec {
+        launch_options: Default::default(),
         endpoint_id: "remote-a".into(),
         launch_profile_id: "codex".into(),
         workspace_path: "/remote/repo".into(),
@@ -1630,6 +1778,7 @@ async fn stale_launch_snapshot_cannot_replace_an_existing_reservation() {
         .record_execution(task_id.clone(), execution(ExecutionPhase::Pending))
         .unwrap();
     let request = ResolvedLaunchRequest {
+        launch_options: Default::default(),
         template: None,
         endpoint_id: "local".into(),
         launch_profile_id: "codex".into(),
@@ -1921,6 +2070,7 @@ fn endpoint_migration_state(node_id: &str) -> (OrchestrationState, PlanId, TaskI
     let (mut state, plan_id, task_id) = seeded_state();
     let endpoint_id = endpoint_migration::unresolved_endpoint_id(node_id);
     state.tasks.get_mut(&task_id).unwrap().run_spec = Some(TaskRunSpec {
+        launch_options: Default::default(),
         endpoint_id: endpoint_id.clone(),
         launch_profile_id: "codex".into(),
         workspace_path: "/remote/repo".into(),
@@ -2050,6 +2200,7 @@ async fn endpoint_migration_does_not_retarget_modern_records_or_explicit_launche
     assert_eq!(fixture.task(&task.id).execution, Some(modern));
     let state = fixture.server.orchestration.snapshot().unwrap();
     let request = ResolvedLaunchRequest {
+        launch_options: Default::default(),
         template: None,
         endpoint_id: "remote-a".into(),
         launch_profile_id: "codex".into(),

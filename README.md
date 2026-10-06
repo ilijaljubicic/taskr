@@ -35,9 +35,10 @@ for inspection. Operators record outcomes and advance scheduling through MCP.
 
 ## How profiles map to work
 
-Profiles are selected for task executions and can be used by tasks from multiple
-projects. A project can contain tasks using different agents, profiles, machines,
-and working directories.
+Assign agent environments to a project, then select a profile from those
+environments for each task execution. Different tasks can use different agents,
+models, reasoning settings, machines, and working directories. Environments can
+be shared by multiple projects.
 
 Each launch selects three things:
 
@@ -60,6 +61,10 @@ For example, the **Shop** project might contain a **Fix checkout** plan:
 
 The tasks share a plan and project while using different environments. Save
 launch choices on a task when it should be ready for later scheduling.
+
+Tasks can carry model and reasoning hints for the orchestrator. Supported choices
+become concrete launch options; executions save the selected settings for resume.
+See [environment and profile selection](docs/profiles.md) for the MCP workflow.
 
 ## Work in Herdr
 

@@ -18,6 +18,9 @@ pub struct Project {
     pub slug: String,
     pub title: String,
     pub description: String,
+    /// Stable source environments whose prepared profiles this project may use.
+    #[serde(default)]
+    pub environment_ids: Vec<String>,
     #[serde(default)]
     pub codex_home: Option<String>,
     #[serde(default)]
@@ -106,6 +109,9 @@ pub struct Task {
     pub auto_schedule: bool,
     #[serde(default)]
     pub run_spec: Option<TaskRunSpec>,
+    /// Advisory preferences for the orchestrator, distinct from launch options.
+    #[serde(default)]
+    pub launch_hints: AgentLaunchHints,
 }
 
 /// Lifecycle phase of a task's execution, as observed through Herdr.
@@ -250,6 +256,9 @@ pub struct TaskExecution {
     #[serde(default)]
     pub runtime_generation: Option<String>,
     pub launch_profile_id: String,
+    /// Effective model/effort chosen for this attempt, when known.
+    #[serde(default)]
+    pub launch_options: AgentLaunchOptions,
     /// Resolved native agent arguments frozen for this attempt.
     #[serde(default)]
     pub launch_args: Vec<String>,
@@ -342,6 +351,46 @@ pub struct TaskRunSpec {
     pub skills: Vec<String>,
     pub template: String,
     pub instruction: String,
+    #[serde(default)]
+    pub launch_options: AgentLaunchOptions,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentLaunchOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+}
+
+impl AgentLaunchOptions {
+    pub fn validate(&self) -> Result<(), String> {
+        for (name, value) in [
+            ("model", &self.model),
+            ("reasoning_effort", &self.reasoning_effort),
+        ] {
+            if let Some(value) = value {
+                if value.is_empty()
+                    || value.starts_with('-')
+                    || value.chars().any(char::is_whitespace)
+                    || value.chars().any(char::is_control)
+                {
+                    return Err(format!("{name} must be a non-empty native option without whitespace or leading '-'") );
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentLaunchHints {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Hash, Serialize, Deserialize)]
@@ -414,6 +463,8 @@ pub struct ProjectSummary {
     pub slug: String,
     pub title: String,
     pub description: String,
+    #[serde(default)]
+    pub environment_ids: Vec<String>,
     #[serde(default)]
     pub codex_home: Option<String>,
     #[serde(default)]
@@ -594,6 +645,8 @@ pub struct CreateTask {
     pub auto_schedule: bool,
     #[serde(default)]
     pub run_spec: Option<TaskRunSpec>,
+    #[serde(default)]
+    pub launch_hints: AgentLaunchHints,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -601,6 +654,8 @@ pub struct CreateTask {
 pub struct CreateProject {
     pub title: String,
     pub description: String,
+    #[serde(default)]
+    pub environment_ids: Vec<String>,
     #[serde(default)]
     pub slug: Option<String>,
     #[serde(default)]
@@ -617,6 +672,9 @@ pub struct CreateProject {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateProject {
+    /// Omitted assignments are preserved; an empty list removes all assignments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment_ids: Option<Vec<String>>,
     #[serde(
         default,
         deserialize_with = "deserialize_home_update",
@@ -649,6 +707,19 @@ fn deserialize_home_update<'de, D: serde::Deserializer<'de>>(
     Option::<String>::deserialize(deserializer).map(Some)
 }
 
+fn validate_environment_ids(ids: &[String]) -> Result<(), String> {
+    let mut seen = HashSet::new();
+    for id in ids {
+        if id.trim().is_empty() || id.trim() != id || id.chars().any(char::is_control) {
+            return Err("environment_ids must contain non-empty IDs without whitespace or control characters".into());
+        }
+        if !seen.insert(id) {
+            return Err(format!("duplicate environment ID '{id}'"));
+        }
+    }
+    Ok(())
+}
+
 fn validate_coder_home(field: &str, home: Option<&str>) -> Result<(), String> {
     if let Some(home) = home {
         if home.trim().is_empty() || home.chars().any(char::is_control) {
@@ -666,6 +737,19 @@ fn validate_coder_home(field: &str, home: Option<&str>) -> Result<(), String> {
 }
 
 impl Project {
+    pub fn require_environment(&self, environment_id: &str) -> Result<(), String> {
+        if !environment_id.trim().is_empty()
+            && self.environment_ids.iter().any(|id| id == environment_id)
+        {
+            Ok(())
+        } else {
+            Err(format!(
+                "environment '{environment_id}' is not assigned to project '{}'; assign it with project_update before launching",
+                self.id.0
+            ))
+        }
+    }
+
     pub fn coder_home(&self, profile: &str) -> Option<&str> {
         match profile {
             "codex" => self.codex_home.as_deref(),
@@ -740,6 +824,8 @@ pub struct UpdateTask {
     pub auto_schedule: Option<bool>,
     #[serde(default)]
     pub run_spec: Option<Option<TaskRunSpec>>,
+    #[serde(default)]
+    pub launch_hints: Option<AgentLaunchHints>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -931,6 +1017,7 @@ impl OrchestrationState {
                     slug: project.slug.clone(),
                     title: project.title.clone(),
                     description: project.description.clone(),
+                    environment_ids: project.environment_ids.clone(),
                     codex_home: project.codex_home.clone(),
                     claude_home: project.claude_home.clone(),
                     opencode_home: project.opencode_home.clone(),
@@ -1277,6 +1364,7 @@ impl OrchestrationState {
         if input.description.trim().is_empty() {
             return Err("project description must not be empty".into());
         }
+        validate_environment_ids(&input.environment_ids)?;
         for (field, home) in [
             ("codex_home", input.codex_home.as_deref()),
             ("claude_home", input.claude_home.as_deref()),
@@ -1293,6 +1381,7 @@ impl OrchestrationState {
             slug,
             title: input.title,
             description: input.description,
+            environment_ids: input.environment_ids,
             codex_home: input.codex_home,
             claude_home: input.claude_home,
             opencode_home: input.opencode_home,
@@ -1311,6 +1400,9 @@ impl OrchestrationState {
         update: UpdateProject,
         now_ms: u64,
     ) -> Result<Project, String> {
+        if let Some(ids) = &update.environment_ids {
+            validate_environment_ids(ids)?;
+        }
         for (field, home) in [
             ("codex_home", &update.codex_home),
             ("claude_home", &update.claude_home),
@@ -1323,6 +1415,9 @@ impl OrchestrationState {
             .projects
             .get_mut(project_id)
             .ok_or_else(|| format!("project '{}' not found", project_id.0))?;
+        if let Some(ids) = update.environment_ids {
+            project.environment_ids = ids;
+        }
         if let Some(home) = update.codex_home {
             project.codex_home = home;
         }
@@ -1475,6 +1570,7 @@ impl OrchestrationState {
             evidence: Vec::new(),
             auto_schedule: input.auto_schedule,
             run_spec: input.run_spec,
+            launch_hints: input.launch_hints,
         };
 
         self.tasks.insert(id, task.clone());
@@ -1527,6 +1623,9 @@ impl OrchestrationState {
         }
         if let Some(run_spec) = update.run_spec {
             task.run_spec = run_spec;
+        }
+        if let Some(hints) = update.launch_hints {
+            task.launch_hints = hints;
         }
         task.updated_at_ms = now_ms;
         Ok(task.clone())
@@ -2002,6 +2101,7 @@ fn format_task_ids(task_ids: &[TaskId]) -> String {
 }
 
 fn validate_task_run_spec(run_spec: &TaskRunSpec) -> Result<(), String> {
+    run_spec.launch_options.validate()?;
     if run_spec.endpoint_id.trim().is_empty() {
         return Err("task run_spec endpoint_id must not be empty".into());
     }
@@ -2096,6 +2196,7 @@ mod tests {
 
     fn create_task(title: &str) -> CreateTask {
         CreateTask {
+            launch_hints: Default::default(),
             plan_id: fixture_plan_id(),
             title: title.into(),
             objective: format!("Implement {title}"),
@@ -2113,6 +2214,7 @@ mod tests {
         state.projects.insert(
             project_id.clone(),
             Project {
+                environment_ids: Default::default(),
                 id: project_id,
                 slug: "project".into(),
                 title: "Project".into(),
@@ -2289,6 +2391,7 @@ mod tests {
 
     fn execution() -> TaskExecution {
         TaskExecution {
+            launch_options: Default::default(),
             native_session_name: None,
             group: ExecutionGroup::Work,
             inspection: false,
@@ -2323,6 +2426,7 @@ mod tests {
 
     fn run_spec() -> TaskRunSpec {
         TaskRunSpec {
+            launch_options: Default::default(),
             endpoint_id: "local".into(),
             launch_profile_id: "codex".into(),
             workspace_path: "/workspace/project".into(),
@@ -2333,6 +2437,81 @@ mod tests {
             template: "task".into(),
             instruction: "Implement this task and report validation.".into(),
         }
+    }
+
+    #[test]
+    fn project_environment_assignments_are_explicit_and_updates_are_atomic() {
+        let mut state = OrchestrationState::new();
+        let project = state
+            .create_project(
+                CreateProject {
+                    title: "Assignments".into(),
+                    description: "Verify project environment policy".into(),
+                    environment_ids: vec!["env-main".into(), "env-other".into()],
+                    ..Default::default()
+                },
+                1,
+            )
+            .unwrap();
+        assert!(project.require_environment("env-main").is_ok());
+        assert!(project.require_environment("env-unassigned").is_err());
+        let failed = state.update_project(
+            &project.id,
+            UpdateProject {
+                environment_ids: Some(vec!["env-main".into(), "env-main".into()]),
+                ..Default::default()
+            },
+            2,
+        );
+        assert!(failed.is_err());
+        assert_eq!(state.projects[&project.id], project);
+        let unchanged = state
+            .update_project(&project.id, UpdateProject::default(), 3)
+            .unwrap();
+        assert_eq!(unchanged.environment_ids, project.environment_ids);
+        let cleared = state
+            .update_project(
+                &project.id,
+                UpdateProject {
+                    environment_ids: Some(vec![]),
+                    ..Default::default()
+                },
+                4,
+            )
+            .unwrap();
+        assert!(cleared.require_environment("env-main").is_err());
+        let reloaded: OrchestrationState =
+            serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+        assert!(reloaded.projects[&project.id].environment_ids.is_empty());
+        assert!(state
+            .create_project(
+                CreateProject {
+                    title: "Invalid".into(),
+                    description: "Invalid assignment".into(),
+                    environment_ids: vec![" ".into()],
+                    ..Default::default()
+                },
+                5
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn model_launch_options_reject_empty_or_option_like_values() {
+        for value in ["", "--other-option", "model with spaces", "model\nvalue"] {
+            assert!(AgentLaunchOptions {
+                model: Some(value.into()),
+                reasoning_effort: None
+            }
+            .validate()
+            .is_err());
+        }
+        assert!(AgentLaunchOptions {
+            model: Some("glm-5.3".into()),
+            reasoning_effort: Some("max".into())
+        }
+        .validate()
+        .is_ok());
     }
 
     #[derive(Debug)]
@@ -2543,6 +2722,7 @@ mod tests {
             .update_task(
                 &task.id,
                 UpdateTask {
+                    launch_hints: Default::default(),
                     title: Some("Renamed Task".into()),
                     objective: Some("New objective".into()),
                     scope: UpdateTaskScope {

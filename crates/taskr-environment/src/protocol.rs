@@ -26,6 +26,22 @@ pub struct ProfileReadiness {
     pub missing_environment: Vec<String>,
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ModelOption {
+    pub model: String,
+    #[serde(default)]
+    pub reasoning_efforts: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ProfileSettings {
+    pub native_profile: Option<String>,
+    pub model: Option<String>,
+    pub reasoning_effort: Option<String>,
+    #[serde(default)]
+    pub model_options: Vec<ModelOption>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PreparedEnvironment {
     pub deployment_id: String,
@@ -44,6 +60,8 @@ pub struct PreparedEnvironment {
     pub dependencies: Vec<EnvironmentDependency>,
     #[serde(default)]
     pub profile_readiness: Vec<ProfileReadiness>,
+    #[serde(default)]
+    pub profile_settings: Vec<ProfileSettings>,
 }
 
 #[derive(Clone, Debug)]

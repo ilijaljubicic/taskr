@@ -3,7 +3,7 @@
 | Command | Purpose |
 | ------- | ------- |
 | `taskr controller` | Runs the MCP control plane. Every terminal operation is delegated to Herdr. |
-| `taskr create-project <title> --description <text>` | Creates a durable orchestration project in the local taskr store. Supports optional `--slug <slug>`. Agent environments are selected through endpoint launch profiles when starting tasks. |
+| `taskr create-project <title> --description <text>` | Creates a durable orchestration project in the local taskr store. Supports optional `--slug <slug>`. Assign environments through admin MCP before launching tasks. |
 | `taskr delete-project <id-or-slug>` | Deletes a durable orchestration project from the local taskr store, including all contained plans, task cards, and task edges. |
 | `taskr list-projects` | Lists durable orchestration projects from the local taskr store so project ids/slugs are discoverable. |
 | `taskr prune` | Removes old retained worker terminals, stale execution records, and finished plans after observing Herdr endpoints. Defaults to dry-run, all categories included, and `--older-than-days 14`; pass `--execute` to apply cleanup. |
@@ -40,4 +40,7 @@ Prune flags:
 | `--herdr-bin` | `herdr` | Herdr executable used to observe live endpoints. |
 | `--herdr-session` | none | Explicit local Herdr session selection. |
 
-Agent environments are selected through prepared endpoint launch profiles. See [environment setup](environments.md) and [MCP tools](mcp.md).
+Assign environments with admin MCP `project_update.environment_ids`, then select
+a prepared endpoint profile for each task. A project created through the CLI
+starts with no assignments. See [profile management](profiles.md),
+[environment setup](environments.md), and [MCP tools](mcp.md).

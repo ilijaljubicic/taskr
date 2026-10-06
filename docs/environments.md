@@ -18,6 +18,9 @@ installation is required. It prepares files; Herdr remains the agent executor.
    use `source_path: "/path/to/environments"` or
    `source_path: "/path/to/environments.zip"` instead. Read the returned environment IDs,
    revisions, native profile names, dependency metadata, and discovery issues.
+   Valid Claude homes with incomplete setup remain listed with `sync_blockers`.
+   They can be assigned to projects; sync and launch require the blockers to be
+   resolved and the source rediscovered.
 2. Pick an `endpoint_id` from `list_endpoints`.
 3. Call `admin_environment_sync` with the selected `source_environment_id`,
    `source_revision`, `endpoint_id`, and explicit `credential_policy`.
@@ -120,13 +123,14 @@ with `settings.json`. Codex requires 0.134.0+ and the advertised `--profile`, `-
 remain native and yield a base choice plus one choice per ready profile. Legacy inline
 Codex profile tables require native migration first. The destination CLI must
 be at least as new as the source. Claude currently yields its base settings
-choice; Claude plugin installations are reported as unsupported rather than
-silently omitted. OpenCode/Kimi environment adapters are not implemented yet;
-already-running agents can still be adopted through MCP.
+choice and includes configured installed plugins. OpenCode/Kimi environment
+adapters are not implemented yet; already-running agents can still be adopted
+through MCP.
 
 Bundles include native configuration, profile files, instructions, rules,
 commands, agents, skills, declared file dependencies, and configured Codex plugin
-installations. External Codex user skills are materialized under the deployed
+installations, plus configured Claude plugins and their installed dependencies.
+External Codex user skills are materialized under the deployed
 home's supported `skills` directory. Repository skills stay with the repository.
 Native sessions/history/logs and general home caches are excluded. Bundles are
 limited to 64 MiB and 10,000 files; file symlinks are materialized, cycles and
@@ -140,6 +144,33 @@ companion stdin, never launch arguments or TASKR snapshots. Interrupted jobs are
 reconciled after restart. Cancellation prevents publishing a launch selection;
 an already-transferred deployment can remain for later reconciliation.
 
+## Claude plugins
+
+Sync reads the native version-2 `plugins/installed_plugins.json` registry and
+the registered marketplace manifests. It copies each configured plugin's
+installed payload, preserves its version and scope, and rebases installation
+and marketplace paths into the managed home. Marketplace component definitions
+are retained, including plugins without their own `plugin.json`. Declared
+installed dependencies are included. Disabled plugins need no payload.
+
+Plugin snapshots use a catalog containing the selected entries and payloads,
+with marketplace auto-updates disabled. Refresh the environment to update them.
+Project/local plugin installations keep their scope and require explicit
+`claude_projects` mappings in the dependency manifest; they never become user
+installations. Plugin runtime locks and saved data are excluded. Native
+`${CLAUDE_PLUGIN_ROOT}` references continue to resolve inside the new payload.
+Launch choices also pin `CLAUDE_CODE_PLUGIN_CACHE_DIR` to that snapshot's plugin
+directory. A configured custom source registry is cloned and rebased there.
+
+Hooks, MCP servers, and LSP executables share dependency inspection and endpoint
+preflight. No plugin installer, hook, helper, or server runs during sync.
+Opaque plugin commands can declare dependencies in the plugin's own
+`taskr-dependencies.json`, with configuration paths relative to that plugin.
+See the [dependency manifest](environment-dependencies.md#claude-plugin-dependencies)
+for path and scope rules. Native keychain-backed plugin secrets still need
+endpoint setup. See the
+[native plugin reference](https://code.claude.com/docs/en/plugins-reference).
+
 Normal launch verifies the selected deployment before allocating a pane. It
 passes `CODEX_HOME` or `CLAUDE_CONFIG_DIR`, native profile arguments, and the
 explicit permission policy to Herdr. Codex uses `--no-daemon --no-alt-screen`.
@@ -151,9 +182,11 @@ Choices are endpoint-specific and immutable: newer syncs retain previous IDs,
 homes, and conversations. Executions pin the deployment through their selected
 profile ID and frozen home/arguments. Resume uses that original home. Task exit
 and ordinary prune never delete native conversations or deployed environments.
-An empty endpoint catalog requires admin setup; there is no global-profile or
-local-endpoint fallback. An explicit profile is required when several choices
-exist; required MCP fields remain required.
+An empty endpoint catalog requires admin setup. Every launch requires an explicit,
+nonempty profile ID from an environment assigned to the task's project. Use
+`list_environments` and `project_update.environment_ids` to manage assignments,
+then `list_launch_profiles` with `project_id` and `endpoint_id` to select a
+prepared choice. See [profile management](profiles.md) for model/effort options.
 
 ## Existing project home constraints
 

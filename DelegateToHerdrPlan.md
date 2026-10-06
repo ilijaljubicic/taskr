@@ -1,8 +1,8 @@
 # Delegate TASKR Execution to Herdr
 
-Date: 2026-10-02; updated 2026-10-05
+Date: 2026-10-02; updated 2026-10-06
 
-Status: Herdr-based implementation is present. The latest D19–D23 changes
+Status: Herdr-based implementation is present. The D19–D23 changes
 (plan spaces, fixed group tabs, fresh panes, native session names/history, and
 explicit MCP inspection resume, and removal of the TASKR terminal-view and
 resume CLI commands) are implemented. The previous cutover passed 203 workspace tests;
@@ -28,6 +28,16 @@ native environment/profile contracts. Optional manifests declare names, source
 versions and original-path mappings; imports stay within their supplied collection.
 Private archive caches persist beside the store. Deployment and agent execution
 continue through the existing sync and Herdr paths.
+
+D31 assigns stable source environments to projects and requires each task to
+select an explicit prepared profile from that boundary. Task model/reasoning
+hints remain advisory; validated launch options and native arguments are frozen
+per attempt and reused by inspection resume. Snapshot version 7 adds assignment
+and option metadata; existing projects need explicit assignments before launch.
+D32 includes configured Claude plugin payloads, installed dependencies and pinned
+marketplace catalogs, preserving versions and mapped installation scopes. Valid
+incomplete Claude homes remain discoverable with setup blockers. See
+[profile management](docs/profiles.md) and [Claude plugins](docs/environments.md#claude-plugins).
 
 D28 begins reusable library extraction here.
 `taskr-core` replaces the domain package and supplies a storage-agnostic mutation
@@ -128,6 +138,9 @@ explicit capability validation.
 | D27 | Discover native environments from supplied folders and ZIP collections as well as installed homes. | Extend `admin_environment_discover` with `source_path`, mutually exclusive with `homes`. An optional version-1 `taskr-environments.json` manifest declares home/kind, names, original home/user-home paths, shared skills and source CLI version. Return the same IDs/revisions/profile choices with durable import provenance; sync one selected environment through the existing local/remote preparation API. Imports never inherit controller user skills or dependencies outside the collection. Archives use bounded, private, atomic caches; source changes require rediscovery. Retain prepared choices and native histories. |
 | D28 | Extract a storage-agnostic reusable orchestration library named `taskr-core`, supporting native TASKR and Workers/Durable Object runtimes. | Rename the domain crate and move persist-before-publish mutation logic into `Orchestrator<S>` using a host-implemented synchronous `SnapshotStore` interface. Core has no concrete stores or execution adapters, SQL, filesystem, Tokio, MCP or ScopeTrail dependencies, nor `Send`/`Sync` bounds on stores. TASKR owns SQLite serialization/migrations, synchronization/clock, MCP, scheduling and Herdr lifecycle integration. Check native tests and Wasm public consumers in CI; `wasm-js` supplies UUID randomness. A Cloudflare host supplies DO SQL storage, alarms/recovery and a network execution adapter separately. Preserve binary/tool/storage contracts; no compatibility package or store migration. The Cloudflare host port remains a later step. |
 | D29 | Share Herdr execution contracts across native TASKR and future container hosts. | Preserve allocation delivery certainty and unresolved intents; extract `HerdrTransport`, `EndpointProvider`, command/stdin/env/cwd/deadline contracts and a container binding adapter outside core; separate read-only observation from ready preparation and per-execution leases; persist resource generations in execution/layout records (native snapshot v6); route companions through the same target; verify restored profile/home/history/workspace before resume; share pure launch/layout/audit/cleanup/ownership/resume policy in core and test native plus non-Send Wasm consumers. SDK bindings, DO persistence/alarms, container images and deployment remain host implementations. See [execution ports](docs/execution-ports.md). |
+| D30 | Rename the project and installed skills to Taskr. | Use `taskr`, `taskr-core`, Taskr skill names and `TASKR_MCP_TOKEN`; publish the npm launcher as `@mmux/taskr`. Preserve durable project and native conversation identities through the completed one-time branding conversion. |
+| D31 | Assign environments to projects and select profiles and model settings per task. | Store stable project `environment_ids`; require an explicit prepared profile from an assigned environment during configuration, manual/scheduled launch and inspection resume. Empty assignments deny launches. Task `launch_hints` guide the orchestrator; concrete `launch_options` are validated against advertised model/effort metadata and frozen with native arguments per attempt. Keep retained deployments and live executions unchanged. |
+| D32 | Clone configured installed Claude plugins rather than rejecting plugin-bearing homes. | Package native v2 installation records, selected marketplace entries, payloads and installed dependency closure. Preserve versions and user/project/local scope, requiring explicit project mappings. Pin marketplace updates and plugin-root environment settings; inspect hooks/MCP/LSP dependencies without executing them. Keep valid incomplete homes visible with `sync_blockers`; sync requires repaired setup and rediscovery. |
 
 ### Layout and conversation implementation contracts
 
@@ -785,8 +798,9 @@ Implementation notes (2026-10-05):
   Native sessions/history and general caches are excluded. Limits are 64 MiB
   and 10,000 files. Unsupported state paths, missing MCP/hook executables,
   remote source-only localhost services, legacy inline profiles, and unsupported
-  plugin formats fail explicitly. Claude plugin cloning and OpenCode/Kimi
-  environment adapters remain follow-up work.
+  plugin formats fail explicitly. Configured Claude plugin payloads, installation
+  scopes, dependency declarations and pinned marketplace catalogs are included.
+  OpenCode/Kimi environment adapters remain follow-up work.
 - The managed root defaults to `~/.local/share/taskr/environments` on the
   endpoint; callers may select an absolute or `~/` root. Staging publishes by
   atomic rename after validation; manifests identify ownership and detect
@@ -1632,7 +1646,8 @@ The renamed release controller is running locally with the migrated store.
 Repository and installed Codex/Claude skills are synchronized. Both discovered
 Codex homes have new ready local deployments containing the Taskr skills;
 existing saved deployments remain available for their conversations. Claude
-plugin preparation remains unsupported, and its source configuration is intact.
+plugin preparation was not yet implemented at that cutover. Configured Claude
+plugin snapshots are now supported; original source configurations stay intact.
 
 Validation passed: 243 Rust workspace tests, 46 companion tests, three store
 migration tests, Clippy, formatting, portable Wasm compilation, the isolated MCP

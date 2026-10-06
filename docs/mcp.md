@@ -9,7 +9,7 @@ Orchestration tools:
 | Tool | Purpose |
 | ---- | ------- |
 | `project_create` | Create a durable project (admin; requires `--enable-admin-tools`). |
-| `project_update` | Update project configuration homes (admin). Omitted homes keep their value; explicit null clears. |
+| `project_update` | Assign `environment_ids` to a project (admin); omitted assignments are preserved and `[]` clears them. Also manages legacy home constraints. |
 | `project_status_update` | Set project status to `Active` or `Archived` (admin). |
 | `project_list` | List projects with plan/task counts. |
 | `plan_create` | Create a plan inside a project. |
@@ -39,7 +39,8 @@ Launch and execution tools:
 | `execution_stop` | Save the report and native conversation reference, exit the coding agent, and close its verified pane. |
 | `list_executions` | List durable executions for a project with live runtime facts. |
 | `list_endpoints` | List Herdr endpoints (local + saved machine profiles) with live availability, plus the pending legacy-node migration counts. |
-| `list_launch_profiles` | List prepared base/native-profile choices for a required `endpoint_id`. |
+| `list_environments` | List known environments, prepared deployments, and discovery blockers; optional `project_id` restricts the list to assigned environments. |
+| `list_launch_profiles` | List prepared choices for `endpoint_id`, optionally filtered by `project_id`, with model/effort options. `include_retained=true` includes earlier deployments. |
 | `admin_environment_discover` | Admin: discover supported local native homes, profiles, and revisions. |
 | `admin_environment_sync` | Admin: explicitly prepare an environment on one endpoint; returns a durable job. |
 | `admin_environment_sync_status` | Admin: inspect sync progress, ready launch IDs and per-profile missing environment prerequisites. |
@@ -130,5 +131,16 @@ Prompts:
 - `coding-quality-guard-send` — quality-guard prompt for a coding worker.
 
 Each prompt takes one required argument, `task_id_or_slug`.
+
+These are worker-assignment templates. Select the agent environment before
+launch through the task's `run_spec` or explicit launch arguments. The operator
+skill covers mixed-profile plans and task-specific choices; templates do not
+select a model or inherit a plan profile.
+
+Projects allow source environment IDs. Each task selects a prepared profile
+from an assigned environment; manual launches, scheduler passes, and inspection
+resume check the assignment. Task `launch_hints` are advisory. Concrete settings
+belong in `run_spec.launch_options` or `start_coding_session.launch_options`.
+See [profile management](profiles.md) for examples and supported option metadata.
 
 See the [Taskr operator skill](../.codex/skills/taskr-operator/SKILL.md) and its [MCP recipes](../.codex/skills/taskr-operator/references/mcp-recipes.md) for examples.

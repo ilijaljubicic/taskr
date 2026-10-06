@@ -175,6 +175,14 @@ User-facing surfaces to keep aligned:
   must verify their pinned deployment before pane allocation. Configuration and
   skills are versioned, credentials require an explicit policy, and bundles
   never enter SQLite or launch arguments. Herdr owns screen/input handling.
+- Projects assign stable source `environment_ids`; tasks select concrete prepared
+  profile IDs from those environments. Keep catalog filtering, run-spec validation,
+  manual/scheduled launches and inspection resume aligned. Empty assignments deny
+  new launches; changing assignments preserves live workers and pinned history.
+- Keep advisory task `launch_hints` separate from concrete `launch_options`.
+  Advertise model/effort choices from scoped source catalogs and destination CLI
+  capabilities, reject unsupported explicit choices before allocation, and freeze
+  resolved settings/native arguments per attempt. Never change shared profiles.
 - Environment verification and companion commands use the same prepared target
   and transport as Herdr. Native remote sync uses the provider-resolved saved SSH
   target, with JSON on stdin; do not introduce a second host catalog or local
@@ -208,6 +216,12 @@ User-facing surfaces to keep aligned:
   profiles publish choices; report missing variable names without their values,
   recheck the selected profile before launch/resume, and refresh readiness when
   endpoint variables change. Metadata defaults keep retained deployments readable.
+- Claude plugin cloning preserves installed versions, native component metadata
+  and installation scope. Keep snapshots self-contained, fence project/local
+  records with explicit mappings, and inspect hooks/MCP/LSP dependencies without
+  executing them. Native plugin-root/data variables are runtime bindings. Keep
+  valid but incomplete Claude homes discoverable with durable `sync_blockers`;
+  assignment never implies readiness or permits an incomplete deployment.
 - Extract Claude registry MCP configuration only. Preserve project scope using
   explicit mappings; exclude trust/sign-in/history and permit native metadata
   writes while pinning MCP definitions. Document manifest contracts in

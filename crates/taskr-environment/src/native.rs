@@ -71,6 +71,10 @@ pub struct AgentEnvironment {
     pub cli_version: String,
     pub native_profiles: Vec<String>,
     #[serde(default)]
+    pub profile_settings: Vec<crate::protocol::ProfileSettings>,
+    #[serde(default)]
+    pub sync_blockers: Vec<String>,
+    #[serde(default)]
     pub dependencies: Vec<crate::protocol::EnvironmentDependency>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_location: Option<ImportedSource>,
@@ -83,6 +87,8 @@ pub struct Discovery {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LaunchChoice {
     pub endpoint_id: String,
+    #[serde(default)]
+    pub source_environment_id: String,
     pub profile: LaunchProfile,
     pub deployment: Option<PreparedEnvironment>,
     pub native_profile: Option<String>,
@@ -120,6 +126,8 @@ struct Registry {
     sources: BTreeMap<String, AgentEnvironment>,
     jobs: BTreeMap<String, SyncJob>,
     choices: Vec<LaunchChoice>,
+    #[serde(default)]
+    discovery_issues: Vec<Value>,
 }
 fn registry_version() -> u32 {
     1
@@ -161,6 +169,11 @@ impl EnvironmentCatalog {
             return Err("Environment registry needs a newer controller".into());
         }
         registry.version = registry_version();
+        for choice in &mut registry.choices {
+            if let Some(deployment) = &choice.deployment {
+                choice.source_environment_id = deployment.source_environment_id.clone();
+            }
+        }
         Ok(Arc::new(Self {
             registry: Mutex::new(registry),
             db_path: Some(db_path),
@@ -175,6 +188,7 @@ impl EnvironmentCatalog {
         Arc::new(Self {
             registry: Mutex::new(Registry {
                 choices,
+                discovery_issues: Vec::new(),
                 ..Registry::default()
             }),
             db_path: None,
@@ -223,13 +237,89 @@ impl EnvironmentCatalog {
             .cloned()
             .collect())
     }
+
+    pub fn environments(&self) -> Result<Value, String> {
+        let registry = self
+            .registry
+            .lock()
+            .map_err(|_| "Environment registry lock poisoned")?;
+        let mut rows = BTreeMap::new();
+        for source in registry.sources.values() {
+            rows.insert(
+                source.source_environment_id.clone(),
+                json!({
+                    "source_environment_id": source.source_environment_id,
+                    "display_name": source.display_name, "kind": source.kind,
+                    "source_home": source.source_home, "source_revision": source.source_revision,
+                    "cli_version": source.cli_version, "native_profiles": source.native_profiles,
+                    "profile_settings": source.profile_settings,
+                    "sync_blockers": source.sync_blockers,
+                    "deployments": []
+                }),
+            );
+        }
+        let mut deployments = BTreeMap::new();
+        for choice in &registry.choices {
+            if let Some(deployment) = &choice.deployment {
+                deployments.insert(
+                    (choice.endpoint_id.clone(), deployment.deployment_id.clone()),
+                    deployment,
+                );
+            }
+        }
+        for job in registry
+            .jobs
+            .values()
+            .filter(|job| job.state == "ready" && !job.request.dry_run)
+        {
+            if let Some(deployment) = &job.prepared {
+                deployments
+                    .entry((
+                        job.request.endpoint_id.clone(),
+                        deployment.deployment_id.clone(),
+                    ))
+                    .or_insert(deployment);
+            }
+        }
+        for ((endpoint, _), deployment) in deployments {
+            let row = rows.entry(deployment.source_environment_id.clone()).or_insert_with(|| json!({
+                "source_environment_id": deployment.source_environment_id,
+                "display_name": deployment.display_name, "kind": deployment.kind,
+                "source_home": null, "source_revision": null, "native_profiles": deployment.native_profiles,
+                "deployments": []
+            }));
+            row["deployments"].as_array_mut().unwrap().push(json!({
+                "endpoint_id": endpoint, "deployment_id": deployment.deployment_id,
+                "source_revision": deployment.source_revision, "home": deployment.home,
+                "cli_version": deployment.cli_version, "profile_readiness": deployment.profile_readiness
+            }));
+        }
+        Ok(
+            json!({"environments": rows.into_values().collect::<Vec<_>>(), "issues": registry.discovery_issues}),
+        )
+    }
+
+    pub fn require_environment(&self, id: &str) -> Result<(), String> {
+        let registry = self
+            .registry
+            .lock()
+            .map_err(|_| "Environment registry lock poisoned")?;
+        if registry.sources.contains_key(id)
+            || registry
+                .choices
+                .iter()
+                .any(|choice| choice.source_environment_id == id)
+        {
+            Ok(())
+        } else {
+            Err(format!("environment '{id}' is unknown; use admin_environment_discover or list_environments"))
+        }
+    }
     pub fn choice(&self, endpoint: &str, requested: Option<&str>) -> Result<LaunchChoice, String> {
         let choices = self.list(endpoint)?;
         if let Some(id) = requested.filter(|id| !id.trim().is_empty()) {
             choices.into_iter().find(|c| c.profile.id == id)
                 .ok_or_else(|| format!("launch profile '{id}' is not prepared/enabled for endpoint '{endpoint}'; use admin_environment_sync first"))
-        } else if choices.len() == 1 {
-            Ok(choices.into_iter().next().unwrap())
         } else {
             Err(
                 "select an explicit launch_profile_id from list_launch_profiles(endpoint_id)"
@@ -277,6 +367,7 @@ impl EnvironmentCatalog {
                     .sources
                     .insert(source.source_environment_id.clone(), source.clone());
             }
+            registry.discovery_issues = discovery.issues.clone();
             Ok(())
         })?;
         Ok(discovery)
@@ -308,6 +399,12 @@ impl EnvironmentCatalog {
                 .ok_or("source environment not discovered; call admin_environment_discover")?;
             if source.source_revision != request.source_revision {
                 return Err("source revision is stale; discover again".into());
+            }
+            if !source.sync_blockers.is_empty() {
+                return Err(format!(
+                    "environment setup is blocked: {}",
+                    source.sync_blockers.join("; ")
+                ));
             }
             if let Some(previous) = registry.jobs.values().find(|j| {
                 serde_json::to_value(&j.request).ok() == serde_json::to_value(&request).ok()
@@ -628,14 +725,22 @@ fn launch_choices(endpoint: &str, deployment: &PreparedEnvironment) -> Vec<Launc
             } else {
                 "CLAUDE_CONFIG_DIR"
             };
+            let mut environment = BTreeMap::from([(variable.into(), deployment.home.clone())]);
+            if deployment.kind == "claude" {
+                environment.insert(
+                    "CLAUDE_CODE_PLUGIN_CACHE_DIR".into(),
+                    format!("{}/plugins", deployment.home),
+                );
+            }
             LaunchChoice {
                 endpoint_id: endpoint.into(),
+                source_environment_id: deployment.source_environment_id.clone(),
                 profile: LaunchProfile {
                     id: format!("{}-p{index}", deployment.deployment_id),
                     agent_kind: deployment.kind.clone(),
                     args,
                     bypass_args: Some(bypass),
-                    env: BTreeMap::from([(variable.into(), deployment.home.clone())]),
+                    env: environment,
                     description: Some(format!(
                         "{} / {}",
                         deployment.display_name,

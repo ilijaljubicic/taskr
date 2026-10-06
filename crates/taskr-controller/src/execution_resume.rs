@@ -33,13 +33,12 @@ pub(super) async fn resume(
         .agent_session
         .as_deref()
         .ok_or("saved execution has no native session ID; cannot resume")?;
-    let profile = ctx.resolve_profile(&source.endpoint_id, Some(&source.launch_profile_id))?;
+    let choice =
+        ctx.resolve_task_profile(&state, task, &source.endpoint_id, &source.launch_profile_id)?;
+    let profile = &choice.profile;
     if profile.agent_kind != kind {
         return Err("saved launch profile now selects a different agent kind".into());
     }
-    let choice = ctx
-        .launch_profiles
-        .choice(&source.endpoint_id, Some(&source.launch_profile_id))?;
     if let Some(deployment) = choice.deployment {
         let variable =
             taskr_herdr::home_env_var_for_kind(kind).ok_or("unknown deployed agent kind")?;

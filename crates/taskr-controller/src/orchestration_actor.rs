@@ -630,6 +630,7 @@ mod tests {
 
     fn create_task(plan_id: PlanId, title: &str) -> CreateTask {
         CreateTask {
+            launch_hints: Default::default(),
             plan_id,
             title: title.into(),
             objective: format!("Objective for {title}"),
@@ -652,6 +653,7 @@ mod tests {
 
     fn execution(execution_id: &str) -> TaskExecution {
         TaskExecution {
+            launch_options: Default::default(),
             native_session_name: None,
             group: taskr_core::orchestration::ExecutionGroup::Work,
             inspection: false,

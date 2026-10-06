@@ -14,6 +14,20 @@ Tasks may also carry an optional `run_spec` with `endpoint_id`,
 task can be started; the task's `auto_schedule` flag separately controls
 whether explicit `orchestration_next` runs may start it automatically.
 
+Projects carry `environment_ids`, referencing stable source environments.
+Each task chooses a prepared profile from one of its project's assigned
+environments. An empty assignment list permits no launches. Plans share this
+project boundary; each task can select a different profile and endpoint.
+Assignments allow all prepared profiles and revisions of that environment,
+without rewriting a task's saved selection or existing execution.
+
+Task `launch_hints` may suggest a model or reasoning approach to the orchestrator.
+They do not change native settings. The orchestrator resolves supported choices
+into `run_spec.launch_options` (`model`, `reasoning_effort`), or passes launch
+options explicitly for one attempt. Execution records preserve effective known
+settings and native arguments; resume reuses those frozen settings. Unsupported
+explicit overrides are rejected. See [profile management](profiles.md).
+
 Operators create or select a project, create a plan, derive tasks from that
 plan, then start executions against individual tasks. Initial delegation uses
 `coding_task_send`, which renders deterministic task context before sending

@@ -102,7 +102,8 @@ discovery checks the controller's installed native CLI. A declared version lets
 discovery package a source without that CLI on the controller; preparation still
 requires a compatible CLI on the endpoint. No executable from a collection runs
 during discovery. Codex needs 0.134.0+ native profile support. Current adapters
-support Codex and plugin-free Claude; other adapters remain unsupported.
+support Codex and Claude, including configured installed plugins; other adapters
+remain unsupported.
 
 ## Revisions, credentials and cache
 

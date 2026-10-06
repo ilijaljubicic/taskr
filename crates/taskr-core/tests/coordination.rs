@@ -36,6 +36,7 @@ fn state() -> (OrchestrationState, TaskId, TaskId) {
         state
             .create_task(
                 CreateTask {
+                    launch_hints: Default::default(),
                     plan_id: plan.id.clone(),
                     title: title.into(),
                     objective: "Fixture".into(),

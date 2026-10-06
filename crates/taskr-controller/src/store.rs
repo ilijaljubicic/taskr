@@ -3,14 +3,14 @@
 use std::path::PathBuf;
 
 use rusqlite::{params, Connection, OptionalExtension};
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 use taskr_core::orchestration::OrchestrationState;
 use taskr_core::SnapshotStore;
 
 use crate::store_paths::{ensure_store_dir, resolve_store_path};
 
 const DB_FILE_NAME: &str = "taskr.db";
-const SNAPSHOT_VERSION: i64 = 6;
+const SNAPSHOT_VERSION: i64 = 7;
 
 /// TASKR host implementation; SQL, migrations and filesystem paths stay here.
 #[derive(Clone)]
@@ -220,6 +220,15 @@ fn migrate_orchestration_snapshot_json(
     migrate_legacy_blocks_edges(&mut value);
     drop_removed_refines_edges(&mut value);
     add_missing_plan_instructions(&mut value);
+    if version < 7 {
+        if let Some(projects) = value.get_mut("projects").and_then(Value::as_object_mut) {
+            for project in projects.values_mut().filter_map(Value::as_object_mut) {
+                project
+                    .entry("environment_ids")
+                    .or_insert_with(|| json!([]));
+            }
+        }
+    }
     serde_json::to_string(&value)
 }
 
@@ -483,6 +492,7 @@ mod tests {
 
     fn create_task(plan_id: PlanId, title: &str) -> CreateTask {
         CreateTask {
+            launch_hints: Default::default(),
             plan_id,
             title: title.into(),
             objective: format!("Objective for {title}"),
@@ -607,6 +617,7 @@ mod tests {
             .create_task(create_task(PlanId("plan-1".into()), "Exec Child"), 103)
             .unwrap();
         let execution = taskr_core::orchestration::TaskExecution {
+            launch_options: Default::default(),
             native_session_name: None,
             group: taskr_core::orchestration::ExecutionGroup::Work,
             inspection: false,

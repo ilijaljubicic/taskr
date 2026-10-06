@@ -89,6 +89,7 @@ fn composed_domain_operations_commit_once_and_reopen_through_public_api() {
             )?;
             state.create_task(
                 CreateTask {
+                    launch_hints: Default::default(),
                     plan_id: plan.id,
                     title: "Embedded task".into(),
                     objective: "Use a host-defined memory store".into(),

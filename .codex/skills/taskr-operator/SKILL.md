@@ -25,6 +25,48 @@ Primary use cases:
   implementation to worker executions.
 - Inspect or recover durable execution bindings without bypassing taskr state.
 
+## Selecting profiles for tasks
+
+A user can request a mixed-profile plan in plain language:
+
+> Use the taskr-operator skill. For plan X, use `glm-5-3-zai` for
+> implementation tasks on `local`, working in `/path/to/repository`.
+> Use my regular Codex profile for validation and review.
+
+- Resolve profile names through endpoint-scoped `list_launch_profiles` and
+  use the returned `id` as `launch_profile_id`. Inspect native profile,
+  agent kind, and deployment to distinguish choices; clarify ambiguous names
+  such as "my regular Codex profile" if existing context does not resolve them.
+  Never substitute a native profile name, model name, or example ID for that ID.
+- Tasks may remain without a `run_spec` while planning. Before starting work,
+  select an explicit, nonempty profile ID, endpoint, and workspace for each
+  task. Save these in its `run_spec` for `task_start` or scheduling; an explicit
+  `start_coding_session` request supplies them for that attempt instead.
+- Plans have no profile-default field or automatic profile inheritance. Apply
+  a plan-wide request to each affected task, including later tasks created
+  under that request. An explicit choice for one task takes precedence over
+  a broader plan or role preference. Preserve unrelated task selections.
+- Assign stable source `environment_ids` to the project through admin
+  `project_create` or `project_update`. Tasks can select any prepared profile
+  from those environments. Use `list_environments(project_id)` and
+  `list_launch_profiles(endpoint_id, project_id)` for project-scoped choices.
+  Unassigned environments and empty profile IDs are rejected before launch.
+- Task `launch_hints` are advisory model/reasoning preferences. Resolve them
+  against the selected profile's `settings.model_options`, then save concrete
+  `model`/`reasoning_effort` in `run_spec.launch_options` or pass launch options
+  explicitly for that attempt. A worker prompt does not configure native model
+  settings. Do not claim a hint was applied unless the execution's recorded
+  options show that selection. Preserve profile/provider/credential boundaries.
+- `role`, `kind`, `skills`, and prompt `template` do not route models or select
+  launch profiles. Implementation, validation, and review tasks can each use
+  different profiles; select the appropriate template separately.
+- Editing launch intent affects future attempts. Live executions and
+  `execution_resume` keep their frozen launch settings. Updating a `run_spec`
+  configures the task without launching it; start work only when requested.
+
+See [profile selection examples](references/mcp-recipes.md#profile-selection-by-task)
+for the MCP calls that implement this request.
+
 ## Catalog
 
 Core MCP endpoint:
@@ -37,8 +79,14 @@ Core MCP endpoint:
 Discovery and state tools:
 
 - `tools/list`: discover the current MCP surface.
+- `list_environments(project_id?)`: inspect discovered environments, prepared
+  deployments, source model options, and discovery issues. With a project, list
+  only assigned environments. Without a project, inspect setup choices/blockers.
 - `list_launch_profiles(endpoint_id)`: inspect prepared endpoint-specific base
   and native-profile choices, including their deployment/revision.
+  Pass `project_id` for project-scoped choices. Default listing shows the newest
+  ready deployment per environment/native-profile pair; use `include_retained`
+  for historical choices. Existing run specs and resumes keep their pinned IDs.
 - `list_endpoints`: list Herdr endpoints (local + saved machine profiles) with
   availability. Observation is read-only and does not start stopped endpoints.
 - `orchestration_status`: inspect projects, plans, tasks, outcomes, blockers,
@@ -54,7 +102,7 @@ Discovery and state tools:
 Project, plan, and task tools:
 
 - `project_create`: create a project boundary through MCP; select agent environments through prepared launch profiles when starting tasks.
-- `project_update`: clear legacy project home constraints through admin MCP; omitted fields retain their values, and live executions keep their frozen environment.
+- `project_update`: assign `environment_ids` and clear legacy project home constraints through admin MCP; omitted fields retain their values, `environment_ids:[]` clears assignments, and live executions keep their frozen environment.
 - `plan_create`, `plan_list`, `plan_update`, `plan_status_update`, `plan_get`:
   manage plan work-package documents and status; `plan_get` returns one full
   stored plan body including its brief and optional instructions.
@@ -136,8 +184,13 @@ Environment setup and launch selection:
 - Codex base/profile choices preserve native `*.config.toml` settings and use
   `CODEX_HOME`; Claude base choices use `CLAUDE_CONFIG_DIR`. The process `HOME`
   is unchanged. Model/provider/hooks/MCP configuration loads natively.
-- Sync currently supports Codex and plugin-free Claude environments. Configured
-  Codex plugin content is included. Unsupported dependencies fail before launch;
+- Sync supports Codex and Claude environments, including configured installed
+  plugins and their dependencies. Claude plugin registries and marketplace paths
+  are rebased; versions are pinned and project/local scopes require explicit
+  project mappings. Valid homes with `sync_blockers` remain discoverable and
+  assignable, but must be repaired and rediscovered before sync. Never remove an
+  enabled plugin or borrow another environment's payload to hide a setup error.
+  Unsupported dependencies fail before launch;
   readiness does not prove provider authentication or service connectivity.
 - A cloned Codex hook may need native review after its path changes. Inspect
   the execution in Herdr, review the referenced script and handle that dialog
@@ -156,6 +209,8 @@ or troubleshooting examples are needed.
    machine profile).
 4. Call `list_launch_profiles` with that endpoint; select a ready choice. If
    none exist, an admin prepares one using the environment setup tools.
+   Assign its source environment to the project before configuring/launching
+   tasks. New and upgraded projects have empty assignments until configured.
 5. Inspect durable state with `orchestration_status`.
 6. For project-scoped executions, call `list_executions(project_id)` with a
    project UUID id or globally unique slug. Use `admin_list_endpoint_agents`
@@ -241,10 +296,10 @@ or troubleshooting examples are needed.
   Use the newly returned `execution.execution_id` for runtime reads and stop;
   `resumed_from` identifies the source attempt. Call MCP on the running
   controller that owns the task. Inspect its new pane directly in Herdr.
-  The owning task and original
-  enabled profile must still exist and select the same agent kind. Saved
-  args/env win over later profile/home edits; native configuration and skills
-  are loaded again from those paths, not restored from a file snapshot.
+  The owning task and original enabled profile must still exist; the profile
+  must select the same agent kind and belong to an environment still assigned
+  to the project. Resume verifies and reuses the original prepared deployment
+  and saved args/env; the native CLI loads configuration and skills from that home.
   The pinned deployment, native conversation history and workspace must exist
   on the selected endpoint before a fresh pane is allocated. Missing history
   requires restoration; syncing configuration alone cannot recreate a session.

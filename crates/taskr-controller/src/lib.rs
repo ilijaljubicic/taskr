@@ -10,10 +10,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use taskr_core::orchestration::{
-    CreatePlan, CreateTask, CreateTaskEdge, ExecutionPhase, ExecutionRecovery, OrchestrationCounts,
-    OrchestrationState, OrchestrationStatus, PlanId, PlanStatus, Project, ProjectId, ProjectStatus,
-    ProjectSummary, Task, TaskDependencyBlocker, TaskEdgeKind, TaskExecution, TaskId, TaskRunSpec,
-    TaskScope, TaskStatus, UpdatePlan, UpdateProject, UpdateTask,
+    AgentLaunchOptions, CreatePlan, CreateTask, CreateTaskEdge, ExecutionPhase, ExecutionRecovery,
+    OrchestrationCounts, OrchestrationState, OrchestrationStatus, PlanId, PlanStatus, Project,
+    ProjectId, ProjectStatus, ProjectSummary, Task, TaskDependencyBlocker, TaskEdgeKind,
+    TaskExecution, TaskId, TaskRunSpec, TaskScope, TaskStatus, UpdatePlan, UpdateProject,
+    UpdateTask,
 };
 use taskr_environment::{
     CompanionConfig, EnvironmentCatalog as ResolvedLaunchProfiles, SyncRequest,
@@ -467,12 +468,21 @@ struct LaunchContext {
 }
 
 impl LaunchContext {
-    fn resolve_profile(
+    fn resolve_task_profile(
         &self,
+        state: &OrchestrationState,
+        task: &Task,
         endpoint: &str,
-        requested: Option<&str>,
-    ) -> Result<LaunchProfile, String> {
-        self.launch_profiles.resolve(endpoint, requested)
+        profile_id: &str,
+    ) -> Result<taskr_environment::LaunchChoice, String> {
+        let project_id = task_project_id(state, task).ok_or("task has no owning project")?;
+        require_project_profile(
+            state,
+            &project_id,
+            endpoint,
+            profile_id,
+            &self.launch_profiles,
+        )
     }
 
     fn persist(&self, task_id: &TaskId, execution: TaskExecution) -> Result<TaskExecution, String> {
@@ -547,27 +557,24 @@ fn prepare_execution(
     if workspace_path.trim().is_empty() {
         return Err("workspace_path must not be empty".into());
     }
-    let profile = ctx.resolve_profile(
-        &endpoint_id,
-        if launch_profile_id.trim().is_empty() {
-            None
-        } else {
-            Some(launch_profile_id.as_str())
-        },
-    )?;
+    let choice = ctx.resolve_task_profile(state, task, &endpoint_id, &launch_profile_id)?;
+    let profile = choice.profile.clone();
     // A descriptive task kind (implementation, review, ...) is metadata
     // about the work; the executable agent kind comes from the profile.
     let agent_kind = profile.agent_kind.clone();
-    let args = profile
+    let mut args = profile
         .effective_args(bypass_permissions)
         .map_err(|error| error.to_string())?
         .clone();
+    let requested_options = requested
+        .and_then(|request| request.launch_options.as_ref())
+        .or_else(|| run_spec.map(|spec| &spec.launch_options))
+        .cloned()
+        .unwrap_or_default();
+    let launch_options = resolve_launch_options(&choice, &requested_options, &mut args)?;
     let project =
         task_project_id(state, task).and_then(|project_id| state.projects.get(&project_id));
     let project_home = project_home_for_kind(project, &agent_kind);
-    let choice = ctx
-        .launch_profiles
-        .choice(&endpoint_id, Some(&profile.id))?;
     if let Some(deployment) = &choice.deployment {
         if project_home
             .as_deref()
@@ -607,6 +614,7 @@ fn prepare_execution(
         endpoint_id: resolved.endpoint_id.clone(),
         runtime_generation: None,
         launch_profile_id: resolved.launch_profile_id.clone(),
+        launch_options,
         launch_args: resolved.args.clone(),
         launch_env: resolved.env.clone(),
         bypass_permissions: resolved.bypass_permissions,
@@ -630,6 +638,114 @@ fn prepare_execution(
     Ok((profile, resolved, execution))
 }
 
+fn require_project_profile(
+    state: &OrchestrationState,
+    project_id: &ProjectId,
+    endpoint: &str,
+    profile_id: &str,
+    catalog: &ResolvedLaunchProfiles,
+) -> Result<taskr_environment::LaunchChoice, String> {
+    if profile_id.trim().is_empty() {
+        return Err(
+            "launch_profile_id must not be empty; select a profile from an assigned environment"
+                .into(),
+        );
+    }
+    let project = state.projects.get(project_id).ok_or("project not found")?;
+    let choice = catalog.choice(endpoint, Some(profile_id))?;
+    project.require_environment(&choice.source_environment_id)?;
+    Ok(choice)
+}
+
+fn resolve_launch_options(
+    choice: &taskr_environment::LaunchChoice,
+    requested: &AgentLaunchOptions,
+    args: &mut Vec<String>,
+) -> Result<AgentLaunchOptions, String> {
+    requested.validate()?;
+    let settings = choice.deployment.as_ref().and_then(|deployment| {
+        deployment
+            .profile_settings
+            .iter()
+            .find(|settings| settings.native_profile == choice.native_profile)
+    });
+    if settings.is_none() && (requested.model.is_some() || requested.reasoning_effort.is_some()) {
+        return Err("profile has no model/effort option metadata; refresh its environment before overriding settings".into());
+    }
+    let resolved = AgentLaunchOptions {
+        model: requested
+            .model
+            .clone()
+            .or_else(|| settings.and_then(|settings| settings.model.clone())),
+        reasoning_effort: requested
+            .reasoning_effort
+            .clone()
+            .or_else(|| settings.and_then(|settings| settings.reasoning_effort.clone())),
+    };
+    if let Some(settings) = settings {
+        let selected = resolved.model.as_ref().and_then(|model| {
+            settings
+                .model_options
+                .iter()
+                .find(|option| &option.model == model)
+        });
+        if requested.model.is_some() && selected.is_none() {
+            return Err("model is not among the selected profile's advertised options".into());
+        }
+        if let Some(effort) = &resolved.reasoning_effort {
+            if (requested.reasoning_effort.is_some() || requested.model.is_some())
+                && !selected.is_some_and(|option| option.reasoning_efforts.contains(effort))
+            {
+                return Err(
+                    "reasoning effort is not advertised for the selected model/profile".into(),
+                );
+            }
+        }
+    }
+    resolved.validate()?;
+    let effort_override_supported = requested.reasoning_effort.is_some()
+        || settings.is_some_and(|settings| {
+            settings.model_options.iter().any(|option| {
+                Some(&option.model) == resolved.model.as_ref()
+                    && resolved
+                        .reasoning_effort
+                        .as_ref()
+                        .is_some_and(|effort| option.reasoning_efforts.contains(effort))
+            })
+        });
+    match choice.profile.agent_kind.as_str() {
+        "codex" | "claude" => {
+            if let Some(model) = &resolved.model {
+                args.extend(["--model".into(), model.clone()]);
+            }
+            if let Some(effort) = resolved
+                .reasoning_effort
+                .as_ref()
+                .filter(|_| effort_override_supported)
+            {
+                if choice.profile.agent_kind == "codex" {
+                    args.extend([
+                        "-c".into(),
+                        format!(
+                            "model_reasoning_effort={}",
+                            serde_json::to_string(effort).unwrap()
+                        ),
+                    ]);
+                } else {
+                    args.extend(["--effort".into(), effort.clone()]);
+                }
+            }
+        }
+        _ if resolved.model.is_some() || resolved.reasoning_effort.is_some() => {
+            return Err(
+                "model/effort launch options are supported for Codex and Claude only".into(),
+            )
+        }
+        _ => {}
+    }
+    Ok(resolved)
+}
+
 /// Explicit launch request for tools that start an execution without a
 /// task run_spec.
 struct ResolvedLaunchRequest {
@@ -641,6 +757,7 @@ struct ResolvedLaunchRequest {
     kind: String,
     skills: Vec<String>,
     template: Option<CodingTaskSendTemplate>,
+    launch_options: Option<AgentLaunchOptions>,
 }
 
 /// Outcome of the launch transaction. `rolled_back` lists the Herdr resources
@@ -1249,7 +1366,15 @@ async fn run_orchestration_next(
         }
         if let Err(error) = scheduler
             .ctx
-            .resolve_profile(&run_spec.endpoint_id, Some(&run_spec.launch_profile_id))
+            .resolve_task_profile(
+                &state,
+                task,
+                &run_spec.endpoint_id,
+                &run_spec.launch_profile_id,
+            )
+            .and_then(|choice| {
+                resolve_launch_options(&choice, &run_spec.launch_options, &mut Vec::new())
+            })
         {
             report.errors.push(schedule_error(task, &error));
             continue;
@@ -1390,7 +1515,15 @@ async fn run_task_start(
     }
     scheduler
         .ctx
-        .resolve_profile(&run_spec.endpoint_id, Some(&run_spec.launch_profile_id))?;
+        .resolve_task_profile(
+            &state,
+            &task,
+            &run_spec.endpoint_id,
+            &run_spec.launch_profile_id,
+        )
+        .and_then(|choice| {
+            resolve_launch_options(&choice, &run_spec.launch_options, &mut Vec::new())
+        })?;
     if let Some(execution) = task.execution.as_ref() {
         if execution.phase.is_active() {
             return Ok(TaskStartReport {
@@ -1885,6 +2018,8 @@ struct StartCodingSessionArgs {
     endpoint_id: String,
     launch_profile_id: String,
     workspace_path: String,
+    #[serde(default)]
+    launch_options: Option<AgentLaunchOptions>,
     #[serde(default)]
     bypass_permissions: bool,
     #[serde(default)]
@@ -2510,6 +2645,11 @@ impl HerdrMcpServer {
         if input.title.trim().is_empty() {
             return Err(mcp_invalid_request("title must not be empty".into()));
         }
+        for id in &input.environment_ids {
+            self.launch_profiles
+                .require_environment(id)
+                .map_err(mcp_invalid_request)?;
+        }
         match self.orchestration.create_project(input) {
             Ok(project) => json_result(to_json(&project)?),
             Err(error) => error_result(error),
@@ -2520,6 +2660,13 @@ impl HerdrMcpServer {
         self.policy.ensure_admin_tools_enabled("project_update")?;
         let (project_id, rest) = split_named_arg(args, "project_id")?;
         let update: UpdateProject = parse_tool_args(Some(&rest))?;
+        if let Some(ids) = &update.environment_ids {
+            for id in ids {
+                self.launch_profiles
+                    .require_environment(id)
+                    .map_err(mcp_invalid_request)?;
+            }
+        }
         let state = store_result(self.orchestration.snapshot())?;
         let resolved =
             resolve_project_id_or_slug(&state, &project_id).map_err(mcp_invalid_request)?;
@@ -2669,6 +2816,21 @@ impl HerdrMcpServer {
         let plan_id =
             resolve_plan_id_or_slug(&state, &input.plan_id.0).map_err(mcp_invalid_request)?;
         let input = CreateTask { plan_id, ..input };
+        if let Some(spec) = &input.run_spec {
+            let project_id = &state.plans[&input.plan_id].project_id;
+            if let Err(error) = require_project_profile(
+                &state,
+                project_id,
+                &spec.endpoint_id,
+                &spec.launch_profile_id,
+                &self.launch_profiles,
+            )
+            .and_then(|choice| {
+                resolve_launch_options(&choice, &spec.launch_options, &mut Vec::new())
+            }) {
+                return error_result(error);
+            }
+        }
         match self.orchestration.create_task(input) {
             Ok(task) => json_result(to_json(&task)?),
             Err(error) => error_result(error),
@@ -2680,6 +2842,22 @@ impl HerdrMcpServer {
         let update: UpdateTask = parse_tool_args(Some(&rest))?;
         let state = store_result(self.orchestration.snapshot())?;
         let resolved = resolve_task_by_id_or_slug(&state, &task_id).map_err(mcp_invalid_request)?;
+        if let Some(Some(spec)) = &update.run_spec {
+            let project_id = task_project_id(&state, &resolved)
+                .ok_or_else(|| mcp_invalid_request("task has no project".into()))?;
+            if let Err(error) = require_project_profile(
+                &state,
+                &project_id,
+                &spec.endpoint_id,
+                &spec.launch_profile_id,
+                &self.launch_profiles,
+            )
+            .and_then(|choice| {
+                resolve_launch_options(&choice, &spec.launch_options, &mut Vec::new())
+            }) {
+                return error_result(error);
+            }
+        }
         match self.orchestration.update_task(resolved.id, update) {
             Ok(task) => json_result(to_json(&task)?),
             Err(error) => error_result(error),
@@ -3033,6 +3211,7 @@ impl HerdrMcpServer {
             kind: args.kind.clone().unwrap_or_default(),
             skills: args.skills.clone().unwrap_or_default(),
             template: args.template,
+            launch_options: args.launch_options,
         };
         let outcome = match launch_task_execution(
             &ctx,
@@ -3276,6 +3455,7 @@ impl HerdrMcpServer {
             endpoint_id: args.endpoint_id.clone(),
             runtime_generation: endpoint.generation,
             launch_profile_id: ADOPTED_LAUNCH_PROFILE_ID.into(),
+            launch_options: AgentLaunchOptions::default(),
             launch_args: Vec::new(),
             launch_env: BTreeMap::new(),
             bypass_permissions: false,
@@ -3557,6 +3737,10 @@ impl HerdrMcpServer {
         #[serde(deny_unknown_fields)]
         struct Args {
             endpoint_id: String,
+            #[serde(default)]
+            project_id: Option<String>,
+            #[serde(default)]
+            include_retained: bool,
         }
         let args: Args = parse_tool_args(args)?;
         endpoint_migration::require_resolved_endpoint(&args.endpoint_id)
@@ -3564,19 +3748,86 @@ impl HerdrMcpServer {
         if args.endpoint_id.trim().is_empty() {
             return Err(mcp_invalid_request("endpoint_id must not be empty".into()));
         }
-        let choices = self
+        let mut choices = self
             .launch_profiles
             .list(&args.endpoint_id)
             .map_err(mcp_invalid_request)?;
+        let state = store_result(self.orchestration.snapshot())?;
+        let project_id = args
+            .project_id
+            .as_deref()
+            .map(|id| resolve_project_id_or_slug(&state, id))
+            .transpose()
+            .map_err(mcp_invalid_request)?;
+        if let Some(id) = &project_id {
+            let project = &state.projects[id];
+            choices.retain(|choice| {
+                project
+                    .require_environment(&choice.source_environment_id)
+                    .is_ok()
+            });
+        }
+        if !args.include_retained {
+            let mut seen = std::collections::HashSet::new();
+            choices.reverse();
+            choices.retain(|choice| {
+                seen.insert((
+                    choice.source_environment_id.clone(),
+                    choice.native_profile.clone(),
+                ))
+            });
+            choices.reverse();
+        }
         let profiles = choices.iter().map(|choice| json!({
             "id": choice.profile.id, "endpoint_id": choice.endpoint_id,
+            "source_environment_id": choice.source_environment_id,
             "agent_kind": choice.profile.agent_kind, "native_profile": choice.native_profile,
             "description": choice.profile.description, "args": choice.profile.args,
             "env_keys": choice.profile.env.keys().collect::<Vec<_>>(),
             "deployment": choice.deployment, "enabled": true,
+            "settings": choice.deployment.as_ref().and_then(|deployment| deployment.profile_settings.iter().find(|settings| settings.native_profile == choice.native_profile)),
             "readiness": "prepared", "availability": "not_probed"
         })).collect::<Vec<_>>();
-        json_result(json!({"endpoint_id": args.endpoint_id, "profiles": profiles}))
+        json_result(
+            json!({"endpoint_id": args.endpoint_id, "project_id": project_id, "profiles": profiles}),
+        )
+    }
+
+    async fn list_environments_tool(
+        &self,
+        args: Option<&Value>,
+    ) -> Result<CallToolResult, McpError> {
+        #[derive(Default, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Args {
+            #[serde(default)]
+            project_id: Option<String>,
+        }
+        let args: Args = parse_tool_args(args)?;
+        let mut inventory = self
+            .launch_profiles
+            .environments()
+            .map_err(mcp_invalid_request)?;
+        let state = store_result(self.orchestration.snapshot())?;
+        if let Some(selector) = args.project_id {
+            let id = resolve_project_id_or_slug(&state, &selector).map_err(mcp_invalid_request)?;
+            let project = &state.projects[&id];
+            inventory["environments"]
+                .as_array_mut()
+                .unwrap()
+                .retain(|environment| {
+                    environment["source_environment_id"]
+                        .as_str()
+                        .is_some_and(|id| project.require_environment(id).is_ok())
+                });
+            inventory["project_id"] = json!(id);
+            inventory["issues"].as_array_mut().unwrap().retain(|issue| {
+                issue["source_environment_id"]
+                    .as_str()
+                    .is_some_and(|id| project.require_environment(id).is_ok())
+            });
+        }
+        json_result(inventory)
     }
 
     async fn admin_environment_discover_tool(
@@ -4628,6 +4879,12 @@ fn format_task_execution(execution: &TaskExecution) -> String {
         execution.workspace_path,
         execution.bypass_permissions,
     )];
+    if let Some(model) = &execution.launch_options.model {
+        lines.push(format!("  model={model}"));
+    }
+    if let Some(effort) = &execution.launch_options.reasoning_effort {
+        lines.push(format!("  reasoning_effort={effort}"));
+    }
     if let Some(pane_id) = execution.pane_id.as_deref() {
         lines.push(format!("  pane={pane_id}"));
     }
@@ -4732,6 +4989,12 @@ fn build_task_card(
         task_status_name(task.status)
     ));
     sections.push(format!("Objective:\n{}", task.objective));
+    if task.launch_hints.model.is_some() || task.launch_hints.reasoning_effort.is_some() {
+        sections.push(format!(
+            "Advisory launch preferences (resolved by the orchestrator before launch): {}",
+            serde_json::to_string(&task.launch_hints).unwrap()
+        ));
+    }
     if let Some(outcome) = task.outcome.as_deref().filter(|o| !o.trim().is_empty()) {
         sections.push(format!("Recorded outcome: {outcome}"));
     }
@@ -5107,7 +5370,12 @@ impl ServerHandler for HerdrMcpServer {
             "TASKR durable orchestration over Herdr-managed terminals. Durable state lives in \
              projects/plans/tasks; task executions bind a task to one Herdr endpoint + pane + \
              coding agent. Target runtimes only by execution_id; deprecated node/session \
-             fields are rejected."
+             fields are rejected. Discover/list environments, assign stable environment_ids \
+             to the project through admin project_update, then use project-scoped \
+             list_launch_profiles to select an explicit prepared profile for each task. \
+             Task launch_hints are advisory; resolve model/reasoning preferences against \
+             advertised profile options into run_spec.launch_options before starting work. \
+             Workers do not change native model settings through task prompts."
                 .into(),
         );
         info
@@ -5126,6 +5394,7 @@ impl ServerHandler for HerdrMcpServer {
                     json!({
                         "title": {"type": "string"},
                         "description": {"type": "string"},
+                        "environment_ids": {"type": "array", "items": {"type": "string"}},
                         "slug": {"type": "string"},
                         "codex_home": {"type": ["string", "null"]},
                         "claude_home": {"type": ["string", "null"]},
@@ -5137,10 +5406,11 @@ impl ServerHandler for HerdrMcpServer {
             ),
             Tool::new(
                 "project_update",
-                "Update project configuration homes (admin). Omitted homes keep their value; explicit null clears.",
+                "Assign project environments and update configuration homes (admin). Omitted assignments are preserved; [] clears assignments.",
                 tool_schema(
                     json!({
                         "project_id": {"type": "string"},
+                        "environment_ids": {"type": "array", "items": {"type": "string"}},
                         "codex_home": {"type": ["string", "null"]},
                         "claude_home": {"type": ["string", "null"]},
                         "opencode_home": {"type": ["string", "null"]},
@@ -5236,6 +5506,7 @@ impl ServerHandler for HerdrMcpServer {
                         "gates": {"type": "array", "items": {"type": "string"}},
                         "slug": {"type": "string"},
                         "auto_schedule": {"type": "boolean"},
+                        "launch_hints": {"type":"object", "additionalProperties":false, "properties": {"model":{"type":"string"},"reasoning_effort":{"type":"string"}}},
                         "run_spec": {
                             "type": "object",
                             "properties": {
@@ -5248,6 +5519,7 @@ impl ServerHandler for HerdrMcpServer {
                                 "skills": {"type": "array", "items": {"type": "string"}},
                                 "template": {"type": "string", "enum": ["task","validate","review","quality-guard"]},
                                 "instruction": {"type": "string"},
+                                "launch_options": {"type":"object", "additionalProperties":false, "properties": {"model":{"type":"string"},"reasoning_effort":{"type":"string"}}},
                             },
                             "required": ["endpoint_id","launch_profile_id","workspace_path","bypass_permissions","role","kind","template","instruction"],
                         },
@@ -5272,6 +5544,7 @@ impl ServerHandler for HerdrMcpServer {
                             },
                         },
                         "gates": {"type": "array", "items": {"type": "string"}},
+                        "launch_hints": {"type":"object", "additionalProperties":false, "properties": {"model":{"type":"string"},"reasoning_effort":{"type":"string"}}},
                         "auto_schedule": {"type": "boolean"},
                         "run_spec": {"type": ["object", "null"]},
                     }),
@@ -5393,6 +5666,7 @@ impl ServerHandler for HerdrMcpServer {
                         "endpoint_id": {"type": "string"},
                         "launch_profile_id": {"type": "string"},
                         "workspace_path": {"type": "string"},
+                        "launch_options": {"type":"object", "additionalProperties":false, "properties": {"model":{"type":"string"},"reasoning_effort":{"type":"string"}}},
                         "bypass_permissions": {"type": "boolean"},
                         "role": {"type": "string"},
                         "kind": {"type": "string"},
@@ -5450,9 +5724,14 @@ impl ServerHandler for HerdrMcpServer {
                 tool_schema(json!({}), None),
             ),
             Tool::new(
+                "list_environments",
+                "List known source environments, prepared deployments and discovery blockers. Optional project_id lists only assigned environments.",
+                tool_schema(json!({"project_id":{"type":"string"}}), None),
+            ),
+            Tool::new(
                 "list_launch_profiles",
-                "List prepared environment/native-profile launch choices on one endpoint. Sync is explicit admin setup.",
-                tool_schema(json!({"endpoint_id":{"type":"string"}}), Some(vec!["endpoint_id"])),
+                "List prepared profiles on an endpoint, optionally restricted to project environments. By default shows newest choices; include_retained exposes earlier deployments without changing saved task selections.",
+                tool_schema(json!({"endpoint_id":{"type":"string"}, "project_id":{"type":"string"}, "include_retained":{"type":"boolean"}}), Some(vec!["endpoint_id"])),
             ),
             Tool::new(
                 "coding_send",
@@ -5666,6 +5945,7 @@ impl ServerHandler for HerdrMcpServer {
             "list_executions" => self.list_executions_tool(args).await,
             "list_endpoints" => self.list_endpoints_tool(args).await,
             "list_launch_profiles" => self.list_launch_profiles_tool(args).await,
+            "list_environments" => self.list_environments_tool(args).await,
             "coding_send" => self.coding_send_tool(args).await,
             "coding_task_send" => self.coding_task_send_tool(args).await,
             "coding_read" => self.coding_read_tool(args).await,
@@ -6521,6 +6801,7 @@ mod tests {
         let project = state
             .create_project(
                 CreateProject {
+                    environment_ids: Default::default(),
                     title: "Seed project".into(),
                     description: "Seeded for tests".into(),
                     slug: Some("seed".into()),
@@ -6547,6 +6828,7 @@ mod tests {
         let task = state
             .create_task(
                 CreateTask {
+                    launch_hints: Default::default(),
                     plan_id: plan.id.clone(),
                     title: "Seed task".into(),
                     objective: "Do the seeded work".into(),
@@ -6564,6 +6846,7 @@ mod tests {
 
     fn bound_execution(execution_id: &str) -> TaskExecution {
         TaskExecution {
+            launch_options: Default::default(),
             native_session_name: None,
             group: taskr_core::orchestration::ExecutionGroup::Work,
             inspection: false,
@@ -6833,6 +7116,7 @@ mod tests {
     fn coding_template_uses_run_instruction_when_no_explicit_instruction_is_supplied() {
         let (mut state, _, _, task_id) = seeded_state();
         state.tasks.get_mut(&task_id).unwrap().run_spec = Some(TaskRunSpec {
+            launch_options: Default::default(),
             endpoint_id: "local".into(),
             launch_profile_id: "codex".into(),
             workspace_path: "/workspace".into(),
@@ -6902,6 +7186,7 @@ mod tests {
             state
                 .create_task(
                     CreateTask {
+                        launch_hints: Default::default(),
                         plan_id: plan.id,
                         title: "Task".into(),
                         objective: "Objective".into(),

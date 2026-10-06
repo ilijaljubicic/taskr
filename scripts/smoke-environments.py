@@ -32,7 +32,10 @@ source.mkdir(parents=True)
 key = source / "credentials/zai-key"
 key.parent.mkdir()
 key.write_text("fixture-source-helper-key")
-(source / "glm.config.toml").write_text('model="glm-fixture"\nmodel_provider="ZAI"\n'
+(source / "glm-catalog.json").write_text(json.dumps({"models":[{"slug":"glm-fixture",
+    "supported_reasoning_levels":[{"effort":"low"},{"effort":"high"},{"effort":"max"}]}]}))
+(source / "glm.config.toml").write_text('model="glm-fixture"\nmodel_provider="ZAI"\nmodel_reasoning_effort="max"\n'
+    'model_catalog_json="glm-catalog.json"\n'
     '[model_providers.ZAI.auth]\ncommand="cat"\nargs=[' + json.dumps(str(key)) + ']\n')
 (source / "blocked.config.toml").write_text('model_provider="env-fixture"\n'
     '[model_providers.env-fixture]\nenv_key="TASKR_SMOKE_REQUIRED_PROVIDER_KEY"\n')
@@ -279,14 +282,23 @@ try:
     assert tool("task_get", {"task_id": task["id"]})["task"]["title"] == task["title"]
     reopened_zip = wait(tool("admin_environment_sync", {**zip_request, "refresh": True}))
     assert reopened_zip["launch_profile_ids"] == zip_ready["launch_profile_ids"]
-    assert len(tool("list_launch_profiles", {"endpoint_id": "local"})["profiles"]) == 7
+    assert len(tool("list_launch_profiles", {"endpoint_id": "local", "include_retained": True})["profiles"]) == 7
     stop()
     start(admin=False)
-    assert len(tool("list_launch_profiles", {"endpoint_id": "local"})["profiles"]) == 7
+    assert len(tool("list_launch_profiles", {"endpoint_id": "local", "include_retained": True})["profiles"]) == 7
     assert tool("admin_environment_sync_status", {"sync_job_id": local["sync_job_id"]}, refuse=True)
     tool("admin_environment_discover", {"homes": [str(source)]}, refuse=True)
     execution_checks = []
     if args.execution_ports:
+        stop()
+        start(admin=True)
+        inventory = tool("list_environments", {})
+        assert any(row["source_environment_id"] == selected["source_environment_id"] for row in inventory["environments"])
+        assert tool("list_environments", {"project_id":project["id"]})["environments"] == []
+        assert tool("list_launch_profiles", {"endpoint_id":"local", "project_id":project["id"]})["profiles"] == []
+        tool("project_update", {"project_id":project["id"], "environment_ids":[selected["source_environment_id"]]})
+        assigned = tool("list_launch_profiles", {"endpoint_id":"local", "project_id":project["id"]})["profiles"]
+        assert assigned and all(p["source_environment_id"] == selected["source_environment_id"] for p in assigned)
         workspace = root / "workspace"
         workspace.mkdir()
         glm = next(p for p in tool("list_launch_profiles", {"endpoint_id":"local"})["profiles"] if p["native_profile"] == "glm")
@@ -299,13 +311,28 @@ try:
         assert not any(json.loads(line)[:2] in (["workspace", "create"], ["tab", "create"], ["pane", "split"]) for line in after.splitlines())
         helper_path.write_bytes(helper_contents)
         helper_path.chmod(0o600)
-        launch = tool("start_coding_session", {"task_id":task["id"], "endpoint_id":"local", "launch_profile_id":local["launch_profile_ids"][0], "workspace_path":str(workspace)})
+        tool("start_coding_session", {"task_id":task["id"], "endpoint_id":"local", "launch_profile_id":"", "workspace_path":str(workspace)}, refuse=True)
+        tool("start_coding_session", {"task_id":task["id"], "endpoint_id":"local", "launch_profile_id":glm["id"], "workspace_path":str(workspace), "launch_options":{"reasoning_effort":"xhigh"}}, refuse=True)
+        tool("task_update", {"task_id":task["id"], "launch_hints":{"model":"Prefer GLM", "reasoning_effort":"Deep reasoning"}})
+        launch = tool("start_coding_session", {"task_id":task["id"], "endpoint_id":"local", "launch_profile_id":glm["id"], "workspace_path":str(workspace), "launch_options":{"model":"glm-fixture", "reasoning_effort":"high"}})
         original = launch["execution"]
         assert original["runtime_generation"] and original["agent_session"]
+        assert original["launch_options"] == {"model":"glm-fixture", "reasoning_effort":"high"}
+        other_task = tool("task_create", {"plan_id":plan["id"], "title":"Different per-task effort", "objective":"Verify independent launch choices"})
+        other = tool("start_coding_session", {"task_id":other_task["id"], "endpoint_id":"local", "launch_profile_id":glm["id"], "workspace_path":str(workspace), "template":"validate", "launch_options":{"reasoning_effort":"low"}})["execution"]
+        assert other["launch_profile_id"] == original["launch_profile_id"]
+        assert other["launch_options"]["reasoning_effort"] == "low"
+        assert tomllib.loads((Path(local["prepared"]["home"]) / "glm.config.toml").read_text())["model_reasoning_effort"] == "max"
+        tool("execution_stop", {"execution_id":other["execution_id"]})
         stopped = tool("execution_stop", {"execution_id":original["execution_id"]})["execution"]
         assert stopped["pane_closed"] and stopped["agent_session"] == original["agent_session"]
+        tool("project_update", {"project_id":project["id"], "environment_ids":[]})
+        tool("execution_resume", {"execution_id":original["execution_id"]}, refuse=True)
+        tool("project_update", {"project_id":project["id"], "environment_ids":[selected["source_environment_id"]]})
         resumed = tool("execution_resume", {"execution_id":original["execution_id"]})["execution"]
         assert resumed["inspection"] and resumed["agent_session"] == original["agent_session"]
+        assert resumed["launch_options"] == original["launch_options"]
+        assert 'model_reasoning_effort="high"' in resumed["launch_args"]
         assert resumed["pane_id"] != original["pane_id"]
         runtime_path = bin_dir / "layout-state.json"
         runtime = json.loads(runtime_path.read_text())
@@ -331,18 +358,63 @@ try:
         after = (root / "herdr.jsonl").read_text()[len(calls_before):]
         assert not any(json.loads(line)[:2] in (["workspace", "create"], ["tab", "create"], ["pane", "split"]) for line in after.splitlines())
         execution_checks = ["missing helper credential refuses allocation", "pinned launch and generation", "verified exit/pane close", "restored native history resume", "stale namespace refusal", "restart namespace recovery", "new generation resume", "missing history refuses allocation"]
+    stop()
+    start(admin=True)
+    claude_source = user / ".claude-work"
+    plugin = claude_source / "plugins/cache/fixture/proof/1"
+    (plugin / "skills/proof").mkdir(parents=True)
+    (plugin / "skills/proof/SKILL.md").write_text("Claude plugin proof skill")
+    (plugin / "probe.py").write_text("raise RuntimeError('Plugin must not execute during provisioning')")
+    (plugin / ".mcp.json").write_text(json.dumps({"probe":{"command":"python3", "args":["${CLAUDE_PLUGIN_ROOT}/probe.py"]}}))
+    marketplace = claude_source / "plugins/marketplaces/fixture"
+    (marketplace / ".claude-plugin").mkdir(parents=True)
+    (marketplace / ".claude-plugin/marketplace.json").write_text(json.dumps({"name":"fixture", "owner":{"name":"Fixture"}, "plugins":[{"name":"proof", "source":"./proof"}]}))
+    (claude_source / "settings.json").write_text(json.dumps({"model":"sonnet", "enabledPlugins":{"proof@fixture":True}}))
+    (claude_source / "plugins/installed_plugins.json").write_text(json.dumps({"version":2,"plugins":{"proof@fixture":[{"scope":"user","version":"1","installPath":str(plugin)}]}}))
+    (claude_source / "plugins/known_marketplaces.json").write_text(json.dumps({"fixture":{"source":{"source":"github","repo":"fixture/plugins"},"installLocation":str(marketplace)}}))
+    (login / ".credentials.json").write_text('{"accessToken":"fixture-claude-endpoint-key"}')
+    broken = user / ".claude-broken"
+    broken.mkdir()
+    (broken / "settings.json").write_text('{"enabledPlugins":{"missing@fixture":true}}')
+    discovery = tool("admin_environment_discover", {"homes":[str(claude_source),str(broken)]})
+    assert len(discovery["environments"]) == 2 and len(discovery["issues"]) == 1
+    ready_source = next(e for e in discovery["environments"] if e["source_home"] == str(claude_source))
+    blocked_source = next(e for e in discovery["environments"] if e["source_home"] == str(broken))
+    assert blocked_source["sync_blockers"]
+    tool("project_update", {"project_id":project["id"], "environment_ids":[selected["source_environment_id"],ready_source["source_environment_id"],blocked_source["source_environment_id"]]})
+    assigned = tool("list_environments", {"project_id":project["id"]})["environments"]
+    assert any(e["source_environment_id"] == blocked_source["source_environment_id"] and e["sync_blockers"] for e in assigned)
+    claude_request = {"source_environment_id":ready_source["source_environment_id"],"source_revision":ready_source["source_revision"],
+                      "endpoint_id":"local","credential_policy":"endpoint","endpoint_auth_home":str(login),"deployment_root":str(root / "claude-deployments")}
+    tool("admin_environment_sync", {**claude_request,"source_environment_id":blocked_source["source_environment_id"],"source_revision":blocked_source["source_revision"]}, refuse=True)
+    claude_local = wait(tool("admin_environment_sync", claude_request))
+    claude_home = Path(claude_local["prepared"]["home"])
+    choice = next(p for p in tool("list_launch_profiles", {"endpoint_id":"local","project_id":project["id"]})["profiles"] if p["id"] in claude_local["launch_profile_ids"])
+    assert "CLAUDE_CODE_PLUGIN_CACHE_DIR" in choice["env_keys"]
+    record = json.loads((claude_home / "plugins/installed_plugins.json").read_text())["plugins"]["proof@fixture"][0]
+    assert Path(record["installPath"]).is_relative_to(claude_home)
+    assert (Path(record["installPath"]) / "skills/proof/SKILL.md").read_text() == "Claude plugin proof skill"
+    assert (claude_home / ".credentials.json").read_text() == (login / ".credentials.json").read_text()
+    claude_remote = wait(tool("admin_environment_sync", {**claude_request,"endpoint_id":remote_id,"deployment_root":str(root / "claude-remote-deployments")}))
+    assert len(claude_remote["launch_profile_ids"]) == 1
+    stop()
+    start()
+    assert any(p["id"] in claude_local["launch_profile_ids"] for p in tool("list_launch_profiles", {"endpoint_id":"local","project_id":project["id"]})["profiles"])
+    assert any(e["source_environment_id"] == blocked_source["source_environment_id"] and e["sync_blockers"] for e in tool("list_environments", {"project_id":project["id"]})["environments"])
     calls = (root / "herdr.jsonl").read_text()
     if not args.execution_ports:
         assert not any(word in calls for word in ['"workspace"', '"agent"', '"pane"'])
     db = (root / "store/taskr.db").read_bytes()
-    assert all(secret not in db for secret in [b"fixture-endpoint-key", b"fixture-source-key", b"fixture-import-key", b"fixture-endpoint-helper-key", b"fixture-source-helper-key"])
+    assert all(secret not in db for secret in [b"fixture-endpoint-key", b"fixture-source-key", b"fixture-import-key", b"fixture-endpoint-helper-key", b"fixture-source-helper-key", b"fixture-claude-endpoint-key"])
     report = {"passed": True, "local_choices": local["launch_profile_ids"], "remote_choices": remote["launch_profile_ids"],
               "imported_folder_home": str(folder_home), "imported_zip_home": str(zip_home), "remote_zip_choices": remote_zip["launch_profile_ids"],
               "checks": ["HTTP MCP schemas", "explicit endpoint", "native base/profile discovery", "dry-run", "destination login policy",
                          "skill cloning", "saved-target remote transport", "cancel", "folder and ZIP collection discovery", "imported native profiles",
                          "ambient skill isolation", "ZIP traversal refusal", "ZIP cache restart and remote sync", "restart persistence", "worker admin denial", "metadata-only SQLite",
                          "taskr-core host store mutations", "rejected mutation rollback", "project/plan/task restart persistence",
-                         "provider helper credential policy and rebasing", "blocked profile prerequisite reporting"] + execution_checks,
+                         "provider helper credential policy and rebasing", "blocked profile prerequisite reporting",
+                         "Claude plugin payload and registry rebasing", "Claude plugin remote sync", "blocked Claude homes remain assignable",
+                         "Claude setup blockers and assignments survive restart"] + execution_checks,
               "real_agents_started": 0, "real_ssh_connections": 0, "user_controller_restarted": False}
     (root / "report.json").write_text(json.dumps(report, indent=2))
     print("Environment MCP smoke passed; evidence:", root / "report.json")

@@ -46,6 +46,90 @@ rejected before Herdr access. `skills` defaults to an empty list.
 {"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"orchestration_status","arguments":{}}}
 ```
 
+## Profile selection by task
+
+For a request such as "use `glm-5-3-zai` for implementation tasks in plan X
+and my regular Codex profile for validation and review", first call
+`list_launch_profiles({"endpoint_id":"local","project_id":"<project-id>"})`. Resolve the GLM native profile
+and the requested regular Codex environment, then use their returned
+`id` values. Multiple deployments can contain the same native name;
+use the user's selected deployment or clarify an unresolved choice.
+
+Apply the selections to individual tasks:
+
+| Task assignment | Launch profile | Template |
+| --- | --- | --- |
+| Implementation | Returned GLM profile ID | `task` |
+| Validation | Returned regular Codex profile ID | `validate` |
+| Review | Returned regular Codex profile ID | `review` |
+
+Replace the placeholder IDs and workspace below with the discovered choices,
+existing task IDs, and the repository path on the endpoint. A `task_update`
+replaces the entire `run_spec`; retain existing instruction, permission, skill,
+and placement choices unless the user requested changes.
+
+MCP `task_update` arguments for an implementation task:
+
+```json
+{
+  "task_id": "<implementation-task-id>",
+  "run_spec": {
+    "endpoint_id": "local",
+    "launch_profile_id": "<returned-glm-launch-profile-id>",
+    "workspace_path": "/path/to/repository",
+    "bypass_permissions": false,
+    "role": "implementation-worker",
+    "kind": "implementation",
+    "skills": [],
+    "template": "task",
+    "instruction": "Implement this task and report changes, validation evidence, and blockers."
+  }
+}
+```
+
+For a validation or review task, set its own `task_id`, the returned regular
+Codex profile ID, the corresponding `role`/`kind` and `template`, and its own
+assignment instruction. A task-specific request, such as "use regular Codex
+for implementation task Y", overrides the broader plan preference for Y only.
+There is no plan-profile field; plan instructions alone do not configure
+launches, and later tasks also need explicit launch intent.
+
+First discover/prepare sources and assign their stable IDs through admin
+`project_update({"project_id":"<project-id>","environment_ids":["<source-environment-id>"]})`.
+`list_environments({})` lists setup choices and blockers;
+`list_environments({"project_id":"<project-id>"})` lists only assigned environments.
+The project allows all prepared profiles within those environments, including
+future sync revisions. Tasks still pin concrete launch IDs. Unassigned profiles
+are rejected during task configuration, manual/scheduled start, and resume.
+
+Profile choices include `settings.model_options` with model names and their
+advertised `reasoning_efforts`. Task preferences can be stored separately:
+
+```json
+{"task_id":"<task-id>","launch_hints":{"model":"Prefer GLM 5.3","reasoning_effort":"Use deep reasoning"}}
+```
+
+These are `task_update` arguments. Resolve advisory hints into concrete options
+and include this object in the full task `run_spec.launch_options`:
+
+```json
+{"model":"glm-5.3","reasoning_effort":"max"}
+```
+
+For one explicit launch, pass `start_coding_session.launch_options` instead.
+An explicit options object replaces the stored object for that attempt; `{}`
+selects profile defaults. Profile configuration is unchanged. Inspect recorded
+`execution.launch_options` and frozen arguments to see the selection used.
+Provider credentials and skills remain those of the selected environment.
+Refresh old deployments without option metadata before requesting overrides.
+
+Configuration does not start a worker. When the user requests a start, call
+`task_start({"task_id_or_slug":"<task-id>"})`. For plan scheduling, enable
+`auto_schedule` only for the requested tasks, preview with
+`orchestration_next({"plan_id":"<plan-id>","dry_run":true})`, then execute
+the pass when authorized. Eligibility still checks dependencies and existing
+executions. Profile edits do not switch a live worker or an inspection resume.
+
 ## Migrate legacy endpoints once
 
 Use `list_endpoints` to inspect pending legacy node IDs and select an actual
@@ -265,8 +349,16 @@ definitions require explicit project mappings and never become global. See
 `docs/environment-dependencies.md` in the TASKR repository for the manifest.
 
 Codex homes contain `config.toml` and optional native `*.config.toml` profiles;
-Claude homes contain `settings.json`. Skills and configured Codex plugin content
-are included. Claude plugin cloning and OpenCode/Kimi adapters are unsupported.
+Claude homes contain `settings.json`. Skills and configured Codex/Claude plugin
+content are included. Claude uses its installed version-2 registry and pinned
+marketplace catalog, preserving installed versions and scopes. Project/local
+installations require explicit project mappings. Native plugin root variables
+remain native; no installer/hook/MCP/LSP command runs during sync. Opaque plugin
+commands can declare dependencies in a plugin-local `taskr-dependencies.json`.
+Valid homes with `sync_blockers` can be assigned but cannot sync until repaired
+and rediscovered. Check those blockers before requesting sync; do not silently
+drop plugins or use another environment's installation. OpenCode/Kimi adapters
+remain unsupported.
 Native histories are excluded. Normal launches use the prepared home and native
 profile without another sync. Clear conflicting legacy project home overrides
 with admin `project_update` and update future task run-spec IDs explicitly.
@@ -337,9 +429,11 @@ ID. Successful `structuredContent` includes these fields:
 Use `exec-inspection` for runtime tools. Inspect its pane directly in Herdr by
 selecting the plan space and group tab. Call `execution_resume` on the running
 controller that owns the task. The current
-profile must exist, be enabled, and select the original agent kind; resume uses
-saved args/env despite later profile or project-home edits. The native CLI reads
-the current configuration/authentication/skills at those saved endpoint paths.
+profile must exist, be enabled, select the original agent kind, and belong to an
+environment still assigned to the project. Resume verifies and reuses the
+original prepared deployment and saved args/env despite later source-profile
+or project-home edits. The native CLI loads configuration/authentication/skills
+from that saved home.
 The owning task must still exist and have no live/unresolved execution, and the
 source must have a saved native session ID. If TASKR records have been pruned,
 use the native CLI's resume picker or saved ID.
