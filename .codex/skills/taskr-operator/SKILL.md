@@ -109,10 +109,24 @@ Environment setup and launch selection:
   dependencies, without controller user-home fallback. Optional manifests map
   original paths; consult `docs/environment-imports.md` in the TASKR repository.
   Keep archives/cache available until sync completes; rediscover changed sources.
-- `credential_policy="endpoint"` requires an existing endpoint-native login
-  home and excludes source login files. `copy` explicitly allows source
+- `credential_policy="endpoint"` uses `endpoint_auth_home` for the required
+  native login and helper credential files; helper/env-only providers do not
+  require unrelated native login files. Source credentials are excluded.
+  `copy` explicitly allows source
   credentials. Never choose copy implicitly. Use `dry_run` for validation and
   `refresh` for a ready selection's credential rotation or repair.
+- Discovery reports dependency metadata. Sync status's
+  `prepared.profile_readiness` reports per-profile missing variable names; only
+  ready profiles publish launch IDs. Provide variables to the endpoint companion
+  and Herdr agent environment, then refresh. Values are not cloned or stored.
+  Launch/resume rechecks the selected profile's pinned files and prerequisites.
+- Helpers are inspected, never run during sync. Opaque commands and non-cat auth
+  helpers require `taskr-dependencies.json` in the native home for indirect files
+  and required variables. Consult `docs/environment-dependencies.md`; do not
+  silently omit a script, credential, cwd or nested configuration dependency.
+- Claude `.claude.json` user MCP definitions are extracted without trust/login
+  metadata. Project-local MCP definitions need explicit project path mappings
+  and keep their scope; repository `.mcp.json` remains repository-owned.
 - `list_launch_profiles` requires `endpoint_id`. Select a returned prepared ID;
   an empty list needs admin sync. The old profile-file/default/enabled CLI flags
   are removed. No implicit sync, endpoint fallback, or global default is used.

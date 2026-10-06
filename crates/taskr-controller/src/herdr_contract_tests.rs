@@ -135,6 +135,8 @@ async fn missing_prepared_environment_refuses_start_before_any_herdr_allocation(
         kind: "codex".into(),
         display_name: "codex / fixture".into(),
         native_profiles: Vec::new(),
+        dependencies: Vec::new(),
+        profile_readiness: Vec::new(),
         home: home.clone(),
         cli_version: "0.160.0".into(),
         credential_policy: "endpoint".into(),

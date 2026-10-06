@@ -42,7 +42,7 @@ Launch and execution tools:
 | `list_launch_profiles` | List prepared base/native-profile choices for a required `endpoint_id`. |
 | `admin_environment_discover` | Admin: discover supported local native homes, profiles, and revisions. |
 | `admin_environment_sync` | Admin: explicitly prepare an environment on one endpoint; returns a durable job. |
-| `admin_environment_sync_status` | Admin: inspect sync progress and ready launch IDs. |
+| `admin_environment_sync_status` | Admin: inspect sync progress, ready launch IDs and per-profile missing environment prerequisites. |
 | `admin_environment_sync_cancel` | Admin: cancel unfinished preparation without publishing launch choices. |
 
 Setting a task to `Passed`, `Delivered`, `Canceled`, or `Failed` automatically

@@ -9,6 +9,23 @@ use taskr_herdr::{
 pub const COMPANION: &str = include_str!("../companion.py");
 pub const MAX_RESPONSE: usize = 128 * 1024 * 1024;
 
+/// Dependency metadata only; command bodies, configuration and credential values
+/// travel on companion stdin and are never persisted in the registry.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EnvironmentDependency {
+    pub kind: String,
+    pub reference: String,
+    pub profiles: Vec<Option<String>>,
+    pub context: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProfileReadiness {
+    pub native_profile: Option<String>,
+    pub state: String,
+    pub missing_environment: Vec<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PreparedEnvironment {
     pub deployment_id: String,
@@ -23,6 +40,10 @@ pub struct PreparedEnvironment {
     pub cli_version: String,
     pub credential_policy: String,
     pub authentication: String,
+    #[serde(default)]
+    pub dependencies: Vec<EnvironmentDependency>,
+    #[serde(default)]
+    pub profile_readiness: Vec<ProfileReadiness>,
 }
 
 #[derive(Clone, Debug)]

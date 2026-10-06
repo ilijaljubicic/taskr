@@ -26,6 +26,247 @@ AUTH_FILES = {"codex": "auth.json", "claude": ".credentials.json"}
 SECRET_KEY = re.compile(r"(^|_)(token|secret|password|api_key|bearer|access_key|authorization)(_|$)", re.I)
 PATH_KEYS = {"model_instructions_file", "model_catalog_json", "config_file", "path"}
 HOOK_INTERPRETERS = {"sh", "bash", "dash", "zsh", "python", "python3", "node", "ruby", "perl", "bun"}
+SYSTEM_COMMANDS = HOOK_INTERPRETERS | {"cat", "env", "npx", "uv", "uvx", "echo", "printf"}
+FILE_ARGUMENT = re.compile(r"\.(py|js|mjs|cjs|sh|rb|pl|json|toml|yaml|yml|pem|crt|key)$", re.I)
+CLAUDE_PROJECT_MCP_KEYS = {"mcpServers", "enabledMcpjsonServers", "disabledMcpjsonServers", "enableAllProjectMcpServers"}
+
+
+def overlay(base, override):
+    result = dict(base)
+    for key, value in override.items():
+        result[key] = overlay(result[key], value) if isinstance(value, dict) and isinstance(result.get(key), dict) else value
+    return result
+
+
+def pointer_part(value):
+    return value.replace("~", "~0").replace("/", "~1")
+
+
+class DependencyInventory:
+    """One bounded graph for export, path adaptation and endpoint preflight.
+
+    Command bodies are never executed. Only declared native command fields are
+    inspected; opaque commands require an explicit dependency declaration.
+    """
+    def __init__(self, home, source, files, checked, resolve, configs, profiles):
+        self.home, self.source, self.files = home, source, files
+        self.checked, self.resolve = checked, resolve
+        self.records, self.credentials, self.mappings, self.config_files = [], {}, {}, []
+        self.directories = {}
+        self.visiting, self.visited = set(), set()
+        self.effective = {None: configs[0][2]}
+        self.effective.update({name: overlay(configs[0][2], config) for name, (_, _, config) in zip(profiles, configs[1:])})
+        self.declarations, self.used_declarations, self.project_mappings = {}, set(), {}
+        manifest = home / "taskr-dependencies.json"
+        if manifest.exists():
+            value = read_config(checked(manifest))
+            if value.get("version") != 1 or set(value) - {"version", "commands", "claude_projects"}:
+                raise ProvisionError("Invalid taskr-dependencies.json manifest")
+            if not isinstance(value.get("commands", []), list) or len(value.get("commands", [])) > MAX_FILES:
+                raise ProvisionError("Invalid command dependency declaration list")
+            for entry in value.get("commands", []):
+                if not isinstance(entry, dict) or set(entry) - {"config", "pointer", "files", "environment"}:
+                    raise ProvisionError("Invalid command dependency declaration")
+                if not isinstance(entry.get("files", []), list) or not isinstance(entry.get("environment", []), list):
+                    raise ProvisionError("Command dependencies must use file and environment lists")
+                config = entry.get("config", "")
+                if not isinstance(config, str) or not config or PurePosixPath(config).is_absolute() or ".." in PurePosixPath(config).parts:
+                    raise ProvisionError("Dependency declarations require a home-relative config")
+                key = (config, entry.get("pointer", ""))
+                if not isinstance(key[1], str) or not key[1].startswith("/") or key in self.declarations:
+                    raise ProvisionError("Invalid or duplicate command dependency pointer")
+                self.declarations[key] = entry
+            self.project_mappings = value.get("claude_projects", {})
+            if not isinstance(self.project_mappings, dict) or any(
+                    not isinstance(k, str) or not isinstance(v, str) or not k.startswith("/") or not v.startswith("/")
+                    for k, v in self.project_mappings.items()):
+                raise ProvisionError("Claude project mappings must use absolute paths")
+            if len(set(self.project_mappings.values())) != len(self.project_mappings):
+                raise ProvisionError("Claude project mappings must not merge scopes")
+            files.append(file_entry(checked(manifest), "home/taskr-dependencies.json"))
+
+    def destination(self, path):
+        for directory in sorted(self.directories, key=lambda p: len(p.parts), reverse=True):
+            if path.is_relative_to(directory):
+                return str(PurePosixPath(self.directories[directory]) / path.relative_to(directory))
+        return str(path.relative_to(self.home)) if path.is_relative_to(self.home) else (
+            "dependencies/files/" + digest(str(path.parent))[:20] + "/" + path.name)
+
+    def record(self, kind, reference, profiles, context):
+        if kind == "environment" and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", reference):
+            raise ProvisionError("Invalid required environment variable name")
+        record = {"kind": kind, "reference": reference, "profiles": profiles, "context": context}
+        if record not in self.records:
+            if len(self.records) >= MAX_FILES:
+                raise ProvisionError("Too many configuration dependencies")
+            self.records.append(record)
+
+    def collect(self, value, base, destination, profiles, context, credential=False, directory=False):
+        path = self.resolve(value, base, allow_missing=credential)
+        relative = self.destination(path)
+        self.mappings.setdefault(destination, {})[value] = relative
+        self.mappings[destination][str(path)] = relative
+        self.record("directory" if directory else "credential" if credential else "file", relative, profiles, context)
+        if directory:
+            if not path.is_dir():
+                raise ProvisionError("Command cwd is not a directory at the source")
+            self.directories[path] = relative
+        elif credential:
+            if path.exists() and not path.is_file():
+                raise ProvisionError("Credential dependencies must be files")
+            self.credentials[relative] = str(path)
+        else:
+            self.files.extend(tree_files(path, "home/" + relative, Path(self.source["root"]) if self.source else None))
+        return path, relative
+
+    def active_profiles(self, destination, pointer, inherited):
+        if destination not in {"config.toml", *[str(n) + ".config.toml" for n in self.effective if n]}:
+            return inherited
+        names = inherited if inherited is not None else (list(self.effective) if destination == "config.toml" else [destination[:-len(".config.toml")]])
+        parts = pointer.split("/")
+        if len(parts) > 2 and parts[1] == "model_providers":
+            provider = parts[2].replace("~1", "/").replace("~0", "~")
+            names = [n for n in names if self.effective[n].get("model_provider", "openai") == provider]
+        return names
+
+    def command(self, value, path, destination, pointer, profiles, auth=False, context="command"):
+        declaration = self.declarations.get((destination, pointer))
+        declaration_key = (destination, pointer)
+        if declaration is None and getattr(self, "effective_scan", False):
+            declaration_key = ("config.toml", pointer)
+            declaration = self.declarations.get(declaration_key)
+        if declaration is not None:
+            self.used_declarations.add(declaration_key)
+        if isinstance(value, dict):
+            program, args = value.get("command"), value.get("args", [])
+            cwd = value.get("cwd")
+            command_env = value.get("env", {})
+            if context == "hooks":
+                try:
+                    words = shlex.split(program)
+                except (ValueError, TypeError):
+                    raise ProvisionError("Invalid native hook command")
+                program, args = (words[0] if words else None), words[1:]
+        elif isinstance(value, list):
+            program, args, cwd, command_env = (value[0] if value else None), value[1:], None, {}
+        else:
+            try:
+                words = shlex.split(value)
+            except (ValueError, TypeError):
+                raise ProvisionError("Invalid native command declaration")
+            program, args, cwd, command_env = (words[0] if words else None), words[1:], None, {}
+        if not isinstance(program, str) or not program or not isinstance(args, list) or not all(isinstance(a, str) for a in args):
+            raise ProvisionError("Invalid native command declaration")
+        base = path.parent
+        if cwd:
+            base, _ = self.collect(cwd, base, destination, profiles, context, directory=True)
+        name = Path(program).name
+        absolute = program.startswith(("/", "~/", "./", "../")) or bool(FILE_ARGUMENT.search(program))
+        if not absolute and not re.fullmatch(r"[A-Za-z0-9_+.-]+", program):
+            raise ProvisionError("Shell assignments and expressions require an explicit executable wrapper")
+        if absolute and name not in SYSTEM_COMMANDS:
+            executable, relative = self.collect(program, base, destination, profiles, context)
+            if not executable.stat().st_mode & 0o111:
+                raise ProvisionError("A bundled command executable is not executable")
+            if executable.read_bytes()[:4] in {b"\x7fELF", b"\xcf\xfa\xed\xfe", b"\xfe\xed\xfa\xcf"}:
+                raise ProvisionError("Native binaries must be provisioned on the endpoint PATH")
+            self.record("bundled_executable", relative, profiles, context)
+            header = executable.read_bytes()[:4096].split(b"\n", 1)[0]
+            if header.startswith(b"#!"):
+                try:
+                    interpreter = shlex.split(header[2:].decode())
+                except (UnicodeError, ValueError):
+                    raise ProvisionError("Invalid bundled executable interpreter")
+                if not interpreter:
+                    raise ProvisionError("Invalid bundled executable interpreter")
+                self.record("executable", interpreter[0], profiles, context)
+                if Path(interpreter[0]).name == "env":
+                    if len(interpreter) != 2 or interpreter[1].startswith("-"):
+                        raise ProvisionError("Unsupported bundled executable env interpreter")
+                    self.record("executable", interpreter[1], profiles, context)
+        else:
+            self.record("executable", name if absolute else program, profiles, context)
+            if absolute:
+                self.mappings.setdefault(destination, {})[program] = "@program:" + name
+        opaque = any(a in {"-c", "-e", "--eval", "-m"} for a in args) or any(
+            re.search(r"[|;&`]|\$\(", a) for a in [program, *args])
+        if (opaque or (auth and name != "cat")) and declaration is None:
+            raise ProvisionError("Opaque command requires taskr-dependencies.json: " + destination + pointer)
+        if not opaque:
+            script_index = next((i for i, a in enumerate(args) if not a.startswith("-")), None) if name in HOOK_INTERPRETERS else None
+            for i, arg in enumerate(args):
+                reference = arg.split("=", 1)[1] if arg.startswith("--") and "=" in arg else arg
+                if "://" in reference or reference.startswith("-"):
+                    continue
+                script = i == script_index and name in HOOK_INTERPRETERS
+                looks_file = reference.startswith(("/", "~/", "./", "../")) or bool(FILE_ARGUMENT.search(reference))
+                if script or looks_file or (auth and name == "cat"):
+                    if not reference.startswith(("/", "~/")) and cwd is None and declaration is None:
+                        raise ProvisionError("Relative command dependencies require an explicit cwd or taskr-dependencies.json")
+                    _, relative = self.collect(reference, base, destination, profiles, context, credential=auth and not script)
+                    if reference != arg:
+                        self.mappings.setdefault(destination, {})[arg] = "@argument:" + arg.split("=", 1)[0] + "=" + relative
+        for env_name in (declaration or {}).get("environment", []):
+            if not isinstance(env_name, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", env_name):
+                raise ProvisionError("Invalid required environment variable name")
+            if env_name not in command_env:
+                self.record("environment", env_name, profiles, context)
+        for entry in (declaration or {}).get("files", []):
+            if not isinstance(entry, dict) or set(entry) - {"path", "credential"} or not isinstance(entry.get("path"), str):
+                raise ProvisionError("Invalid declared dependency file")
+            if not isinstance(entry.get("credential", False), bool):
+                raise ProvisionError("Dependency credential classification must be boolean")
+            self.collect(entry["path"], base, destination, profiles, context, credential=entry.get("credential", False))
+
+    def scan(self, path, destination, config=None, inherited=None):
+        path = self.checked(path)
+        if path in self.visiting:
+            raise ProvisionError("A native configuration dependency cycle is unsupported")
+        key = (path, tuple(inherited or []))
+        if key in self.visited:
+            return
+        if len(self.visited) >= 256 or len(self.visiting) >= 32:
+            raise ProvisionError("Native configuration dependency graph exceeds its limit")
+        self.visiting.add(path)
+        self.config_files.append(destination)
+        config = config if config is not None else read_config(path)
+        def visit(value, pointer="", context=""):
+            profiles = self.active_profiles(destination, pointer, inherited if inherited is not None else list(self.effective))
+            if isinstance(value, dict):
+                if "command" in value and isinstance(value["command"], str) and (
+                        context in {"mcp_servers", "mcpServers", "auth", "hooks"}):
+                    self.command(value, path, destination, pointer, profiles, auth=context == "auth", context=context)
+                for name, child in value.items():
+                    child_context = name if name in {"mcp_servers", "mcpServers", "auth", "hooks", "env_http_headers"} else context
+                    child_pointer = pointer + "/" + pointer_part(name)
+                    if name in PATH_KEYS and isinstance(child, str):
+                        nested, relative = self.collect(child, path.parent, destination, profiles, "configuration")
+                        if name == "config_file":
+                            self.scan(nested, relative, inherited=profiles)
+                    elif name in {"notify", "apiKeyHelper"} and isinstance(child, (str, list)):
+                        self.command(child, path, destination, child_pointer, profiles, auth=name == "apiKeyHelper", context=name)
+                    elif name in {"env_key", "bearer_token_env_var", "apiKeyHelperEnvVar"} and isinstance(child, str):
+                        self.record("environment", child, profiles, "provider" if name == "env_key" else context)
+                    else:
+                        visit(child, child_pointer, child_context)
+            elif isinstance(value, list):
+                for index, child in enumerate(value):
+                    visit(child, pointer + "/" + str(index), context)
+            elif isinstance(value, str) and context != "env_http_headers":
+                for variable in re.findall(r"\$\{(?:env:)?([A-Za-z_][A-Za-z0-9_]*)\}", value):
+                    self.record("environment", variable, profiles, context or "configuration")
+        visit(config)
+        self.visiting.remove(path)
+        self.visited.add(key)
+
+    def finish(self):
+        if set(self.declarations) != self.used_declarations:
+            raise ProvisionError("A taskr-dependencies.json command pointer does not match native configuration")
+        if set(self.config_files) & self.credentials.keys():
+            raise ProvisionError("Native configuration cannot be classified as helper credential data")
+        # Credentials encountered via trees or a second config reference must
+        # still obey policy, including during metadata-only discovery.
+        return [entry for entry in self.files if entry["path"] not in {"home/" + p for p in self.credentials}]
 
 
 class ProvisionError(Exception):
@@ -118,6 +359,15 @@ def pinned_config(config):
     return config
 
 
+def pinned_claude_registry(config):
+    result = {"mcpServers": config.get("mcpServers", {})}
+    for project, settings in config.get("projects", {}).items():
+        selected = {key: settings[key] for key in CLAUDE_PROJECT_MCP_KEYS if key in settings}
+        if selected:
+            result.setdefault("projects", {})[project] = selected
+    return result
+
+
 def native_version(kind):
     if not shutil.which(kind):
         raise ProvisionError("Required coding CLI is not on the endpoint PATH: " + kind)
@@ -190,7 +440,7 @@ def export(home, kind, source=None):
         if boundary is not None and not resolved.is_relative_to(boundary):
             raise ProvisionError("Imported dependency escapes the collection folder")
         return resolved
-    def dependency_path(value):
+    def dependency_path(value, base=None, allow_missing=False):
         if source:
             path = Path(value)
             if value.startswith("~/"):
@@ -200,11 +450,16 @@ def export(home, kind, source=None):
             elif original_user and path.is_relative_to(original_user):
                 path = boundary / path.relative_to(original_user)
             elif not path.is_absolute():
-                path = home / path
+                path = (base or home) / path
         else:
             path = Path(value).expanduser()
-            path = home / path if not path.is_absolute() else path
+            path = (base or home) / path if not path.is_absolute() else path
         if not path.exists():
+            if allow_missing:
+                resolved = path.resolve()
+                if boundary is not None and not resolved.is_relative_to(boundary):
+                    raise ProvisionError("Imported dependency escapes the collection folder")
+                return resolved
             raise ProvisionError("A referenced configuration dependency is missing at the source")
         return checked(path)
     config_name = "config.toml" if kind == "codex" else "settings.json"
@@ -218,6 +473,7 @@ def export(home, kind, source=None):
     files = BundleFiles()
     files.append(file_entry(checked(home / config_name), "home/" + config_name))
     configs = [config]
+    config_entries = [(home / config_name, config_name, config)]
     path_mappings = {original_home: "."} if original_home else {}
     profiles = []
     if kind == "codex":
@@ -226,6 +482,7 @@ def export(home, kind, source=None):
             if not re.fullmatch(r"[A-Za-z0-9_-]+", name):
                 raise ProvisionError("Invalid native profile filename")
             configs.append(read_config(checked(profile)))
+            config_entries.append((profile, profile.name, configs[-1]))
             profiles.append(name)
             files.append(file_entry(checked(profile), "home/" + profile.name))
     for name in ("AGENTS.md", "CLAUDE.md", "hooks.json"):
@@ -233,6 +490,7 @@ def export(home, kind, source=None):
             files.append(file_entry(checked(home / name), "home/" + name))
             if name == "hooks.json":
                 configs.append(read_config(checked(home / name)))
+                config_entries.append((home / name, name, configs[-1]))
     for name in ("rules", "agents", "skills", "commands"):
         files += tree_files(home / name, "home/" + name, boundary)
     # Native plugin installations are configuration dependencies, even though
@@ -266,34 +524,52 @@ def export(home, kind, source=None):
         # Claude installation records can mix project and user scopes. Refuse
         # incomplete clones rather than silently losing enabled plugins.
         raise ProvisionError("Claude plugin cloning is unsupported; provision a plugin-free source or its dependencies first")
-    def dependencies(value, key=""):
-        if isinstance(value, dict):
-            for k, v in value.items():
-                dependencies(v, k)
-        elif isinstance(value, list):
-            for v in value:
-                dependencies(v, key)
-        elif isinstance(value, str) and key in PATH_KEYS:
-            path = dependency_path(value)
-            destination = str(path.relative_to(home)) if path.is_relative_to(home) else (
-                "dependencies/files/" + digest(str(path))[:20] + "/" + path.name)
-            if not path.is_relative_to(home) or source:
-                path_mappings[str(path)] = destination
-                path_mappings[value] = destination
-            files.extend(tree_files(path, "home/" + destination, boundary))
-    for settings in configs:
-        dependencies(settings)
-        for command in hook_commands(settings):
-            program, script = hook_command_parts(command)
-            for reference in ([script] if script else []) + (
-                    [program] if (program.startswith("/") or program.startswith("~/"))
-                    and Path(program).name not in HOOK_INTERPRETERS else []):
-                path = dependency_path(reference)
-                destination = str(path.relative_to(home)) if path.is_relative_to(home) else (
-                    "dependencies/files/" + digest(str(path))[:20] + "/" + path.name)
-                path_mappings[str(path)] = destination
-                path_mappings[reference] = destination
-                files.extend(tree_files(path, "home/" + destination, boundary))
+    inventory = DependencyInventory(home, source, files, checked, dependency_path, config_entries, profiles)
+    if kind == "claude":
+        registry = home / ".claude.json"
+        if not registry.exists() and not source and home == Path.home() / ".claude":
+            registry = Path.home() / ".claude.json"
+        if registry.exists():
+            native = pinned_claude_registry(read_config(checked(registry)))
+            sanitized = {"mcpServers": native["mcpServers"]}
+            for project, settings in native.get("projects", {}).items():
+                target = inventory.project_mappings.get(project)
+                if not target:
+                    raise ProvisionError("Claude project MCP definitions require an explicit project path mapping")
+                sanitized.setdefault("projects", {})[target] = settings
+            raw = json.dumps(sanitized).encode()
+            files.append({"path": "home/.claude.json", "data": base64.b64encode(raw).decode(),
+                          "sha256": hashlib.sha256(raw).hexdigest(), "executable": False})
+            config_entries.append((registry, ".claude.json", sanitized))
+    for path, relative, settings in config_entries:
+        inventory.scan(path, relative, settings)
+    # Configured plugin hooks/MCP declarations also belong to the graph.
+    for entry in list(files):
+        relative = str(PurePosixPath(entry["path"]).relative_to("home"))
+        if relative not in inventory.config_files and PurePosixPath(relative).name in {"hooks.json", ".mcp.json"}:
+            path = home / relative
+            if path.is_file():
+                inventory.scan(path, relative)
+    # Derive prerequisites from each fully overlaid profile, so an override of
+    # a provider helper, MCP command or env_key does not retain base requirements.
+    inventory.records = []
+    inventory.visited = set()
+    inventory.effective_scan = True
+    for name, effective in inventory.effective.items():
+        relative = name + ".config.toml" if name is not None else config_name
+        inventory.scan(home / relative, relative, effective, inherited=[name])
+    for path, relative, settings in config_entries:
+        if relative not in {config_name, *[p + ".config.toml" for p in profiles]}:
+            inventory.scan(path, relative, settings)
+    for relative in list(inventory.config_files):
+        if PurePosixPath(relative).name in {"hooks.json", ".mcp.json"} and (home / relative).is_file():
+            inventory.scan(home / relative, relative)
+    files = inventory.finish()
+    # Absolute declarations also adapt script bodies without interpreting them.
+    # Relative references remain local to their declaring configuration file.
+    for mappings in inventory.mappings.values():
+        path_mappings.update({old: target for old, target in mappings.items()
+                              if old.startswith(("/", "~/")) and not target.startswith("@program:")})
     # User skills outside CODEX_HOME are explicitly bundled into the native
     # home/skills location still supported by the installed CLI. No HOME override.
     if kind == "codex":
@@ -311,6 +587,8 @@ def export(home, kind, source=None):
     if len(files) > MAX_FILES:
         raise ProvisionError("Environment contains too many files")
     revision_data = {"kind": kind, "version": version, "profiles": profiles, "path_mappings": path_mappings,
+                     "dependencies": inventory.records, "config_mappings": inventory.mappings,
+                     "credential_files": inventory.credentials,
                      "files": [{k: f[k] for k in ("path", "sha256", "executable")} for f in files]}
     if source:
         revision_data["source"] = source
@@ -324,7 +602,14 @@ def export(home, kind, source=None):
             "source_home": str(home), "source_user_home": str(user_home),
             "cli_version": version, "native_profiles": profiles, "source_revision": revision,
             "source_environment_id": "env-" + digest([kind, source["kind"], source["path"], source["relative_home"]] if source else [kind, str(home)])[:24], "files": files,
-            "path_mappings": path_mappings}
+            "path_mappings": path_mappings, "config_mappings": inventory.mappings,
+            "dependencies": inventory.records, "credential_files": inventory.credentials,
+            "config_files": sorted(set(inventory.config_files)),
+            "native_login_required": any(
+                ((c.get("model_provider", "openai") == "openai" and not any(
+                    c.get("model_providers", {}).get("openai", {}).get(k) for k in ("env_key", "auth", "experimental_bearer_token"))) or
+                 c.get("model_providers", {}).get(c.get("model_provider"), {}).get("requires_openai_auth"))
+                for c in inventory.effective.values()) if kind == "codex" else not config.get("apiKeyHelper") and not config.get("env", {}).get("ANTHROPIC_API_KEY") and not config.get("env", {}).get("ANTHROPIC_AUTH_TOKEN")}
 
 
 def contains_credentials(value, context=""):
@@ -342,6 +627,11 @@ def contains_credentials(value, context=""):
                 return True
         return False
     if isinstance(value, list):
+        for index, item in enumerate(value[:-1]):
+            if isinstance(item, str) and item.startswith("--") and SECRET_KEY.search(item[2:].replace("-", "_")):
+                following = value[index + 1]
+                if isinstance(following, str) and following and not following.startswith("$"):
+                    return True
         return any(contains_credentials(v, context) for v in value)
     return False
 
@@ -587,7 +877,7 @@ def discover(request):
         try:
             bundle = export(home, kind, source)
             environment = {k: bundle[k] for k in ("source_environment_id", "source_home", "display_name",
-                "source_revision", "kind", "cli_version", "native_profiles")}
+                "source_revision", "kind", "cli_version", "native_profiles", "dependencies")}
             if source:
                 environment["source_location"] = source
             environments.append(environment)
@@ -619,12 +909,19 @@ def export_request(request):
                     continue
                 if contains_credentials(config):
                     raise ProvisionError("Configuration embeds credentials; explicitly select copy policy or remove them")
-    elif (home / AUTH_FILES[bundle["kind"]]).is_file():
-        auth_file = home / AUTH_FILES[bundle["kind"]]
-        if source and not auth_file.resolve().is_relative_to(Path(source["root"])):
-            raise ProvisionError("Imported login file escapes the collection folder")
-        bundle["files"].append(file_entry(auth_file,
-                                           "home/" + AUTH_FILES[bundle["kind"]], include_login=True))
+    else:
+        for relative, reference in bundle.get("credential_files", {}).items():
+            if not Path(reference).is_file():
+                raise ProvisionError("Source helper credential file is missing; supply it or select endpoint policy")
+            entry = file_entry(Path(reference), "home/" + relative, include_login=True)
+            entry["executable"] = False
+            bundle["files"].append(entry)
+        if (home / AUTH_FILES[bundle["kind"]]).is_file():
+            auth_file = home / AUTH_FILES[bundle["kind"]]
+            if source and not auth_file.resolve().is_relative_to(Path(source["root"])):
+                raise ProvisionError("Imported login file escapes the collection folder")
+            bundle["files"].append(file_entry(auth_file,
+                                               "home/" + AUTH_FILES[bundle["kind"]], include_login=True))
     bundle["credential_policy"] = policy
     bundle["bundle_digest"] = digest(bundle)
     return bundle
@@ -637,12 +934,20 @@ def safe_member(name):
     return path
 
 
-def adapt_text(raw, source, final_home, suffix):
+def adapt_text(raw, source, final_home, suffix, relative=None):
     pairs = {source["source_home"]: str(final_home),
              source["source_user_home"] + "/.agents/skills": str(final_home / "skills/_user_agents")}
     pairs.update({old: str(final_home / relative) for old, relative in source.get("path_mappings", {}).items()})
+    def mapped(value):
+        if value.startswith("@program:"):
+            return value[len("@program:"):]
+        if value.startswith("@argument:"):
+            flag, path = value[len("@argument:"):].split("=", 1)
+            return flag + "=" + str(final_home / path)
+        return str(final_home / value)
+    pairs.update({old: mapped(value) for old, value in source.get("config_mappings", {}).get(relative, {}).items()})
     ordered = sorted(pairs, key=len, reverse=True)
-    absolute = [p for p in ordered if p.startswith("/")]
+    absolute = [p for p in ordered if p.startswith(("/", "~/", "--"))]
     pattern = re.compile(r"(?<![A-Za-z0-9_./-])(?:" + "|".join(re.escape(p) for p in absolute) + r")(?=$|[/\s\"'])")
     def replace(value):
         for old in ordered:
@@ -715,6 +1020,38 @@ def validate_dependencies(config, final_home, included, remote):
                 raise ProvisionError("A hook executable is missing on the endpoint")
 
 
+def preflight_dependencies(dependencies, home, included=None, selected=None, all_profiles=False):
+    """Check metadata only: never evaluate helper bodies or fetch a provider."""
+    missing_environment = set()
+    for item in dependencies:
+        if not item["profiles"] or (not all_profiles and selected not in item["profiles"]):
+            continue
+        kind, reference = item["kind"], item["reference"]
+        if kind == "environment":
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", reference):
+                raise ProvisionError("Invalid required environment variable name")
+            if not os.environ.get(reference):
+                missing_environment.add(reference)
+        elif kind == "executable":
+            if not shutil.which(reference):
+                context = "MCP" if item["context"] in {"mcp_servers", "mcpServers"} else "Command"
+                raise ProvisionError(context + " executable is missing on the endpoint: " + reference)
+        else:
+            safe_member("home/" + reference)
+            path = home / reference
+            if included is not None:
+                exists = reference in included or any(p.startswith(reference + "/") for p in included)
+                if kind == "directory":
+                    exists = True  # created explicitly during publication
+            else:
+                exists = path.is_dir() if kind == "directory" else path.is_file() and not path.is_symlink()
+            if not exists:
+                raise ProvisionError("A bundled " + ("hook" if item["context"] == "hooks" else "command") + " dependency is missing")
+            if kind == "bundled_executable" and included is None and not os.access(path, os.X_OK):
+                raise ProvisionError("A bundled command executable is not executable")
+    return sorted(missing_environment)
+
+
 def prepare(request):
     bundle = request["bundle"]
     if bundle.get("bundle_version") != 1:
@@ -730,19 +1067,33 @@ def prepare(request):
     if any(p.is_symlink() for p in [root, *root.parents]):
         raise ProvisionError("Managed deployment root must not contain symlinks")
     auth = None
+    endpoint_credentials = {}
     auth_name = AUTH_FILES[bundle["kind"]]
     if bundle["credential_policy"] == "endpoint":
         auth_home = request.get("endpoint_auth_home")
         if not auth_home:
             raise ProvisionError("endpoint credential policy requires endpoint_auth_home")
-        auth_file = Path(auth_home).expanduser() / auth_name
-        if not auth_file.is_file():
-            raise ProvisionError("Selected endpoint login file is missing; authenticate that home first")
-        auth = auth_file.read_bytes()
-        if len(auth) > MAX_BYTES:
-            raise ProvisionError("Native login file exceeds the bundle size limit")
+        auth_root = Path(auth_home).expanduser()
+        if bundle.get("native_login_required", True):
+            auth_file = auth_root / auth_name
+            if not auth_file.is_file():
+                raise ProvisionError("Selected endpoint login file is missing; authenticate that home first")
+            if auth_file.stat().st_size > MAX_BYTES:
+                raise ProvisionError("Native login file exceeds the bundle size limit")
+            auth = auth_file.read_bytes()
+            if len(auth) > MAX_BYTES:
+                raise ProvisionError("Native login file exceeds the bundle size limit")
+        for relative in bundle.get("credential_files", {}):
+            safe_member("home/" + relative)
+            credential = auth_root / relative
+            if not credential.is_file() or not credential.resolve().is_relative_to(auth_root.resolve()):
+                raise ProvisionError("Selected endpoint helper credential file is missing or escapes its home")
+            if credential.stat().st_size > MAX_BYTES:
+                raise ProvisionError("Credential file exceeds the bundle size limit")
+            endpoint_credentials[relative] = credential.read_bytes()
     deployment_id = "dep-" + digest([expected, str(root), request.get("endpoint_auth_home"),
-                                    hashlib.sha256(auth).hexdigest() if auth is not None else None])[:32]
+                                    hashlib.sha256(auth).hexdigest() if auth is not None else None,
+                                    {p: hashlib.sha256(v).hexdigest() for p, v in endpoint_credentials.items()}])[:32]
     final = root / deployment_id
     manifest_path = final / ".taskr-environment.json"
     # Dry-run validates without creating the managed root or staging files.
@@ -750,6 +1101,7 @@ def prepare(request):
     seen = set()
     contents = []
     configs = []
+    credential_paths = set(bundle.get("credential_files", {})) | {auth_name}
     for entry in bundle["files"]:
         member = safe_member(entry["path"])
         if str(member) in seen or len(seen) >= MAX_FILES:
@@ -760,16 +1112,33 @@ def prepare(request):
         if total > MAX_BYTES or hashlib.sha256(raw).hexdigest() != entry["sha256"]:
             raise ProvisionError("Invalid or excessive bundle contents")
         destination = final.joinpath(*member.parts[1:])
-        if destination.suffix in {".toml", ".json", ".md", ".sh", ".py"}:
-            raw = adapt_text(raw.decode(), bundle, final, destination.suffix).encode()
-        if member.name == "config.toml" or member.name.endswith(".config.toml"):
+        relative = str(member.relative_to("home"))
+        if relative not in credential_paths and destination.suffix in {".toml", ".json", ".md", ".sh", ".py", ".js", ".mjs", ".cjs"}:
+            raw = adapt_text(raw.decode(), bundle, final, destination.suffix, relative).encode()
+        if relative in bundle.get("config_files", []) and member.suffix == ".toml":
             configs.append(tomllib.loads(raw.decode()))
-        elif member.name in {"settings.json", "hooks.json"}:
+        elif member.name == "config.toml" or member.name.endswith(".config.toml"):
+            configs.append(tomllib.loads(raw.decode()))
+        elif relative in bundle.get("config_files", []) or member.name in {"settings.json", "hooks.json"}:
             configs.append(json.loads(raw.decode()))
         contents.append((member, raw, entry["executable"]))
+    for relative, raw in endpoint_credentials.items():
+        if "home/" + relative in seen:
+            raise ProvisionError("Source credentials must be excluded under endpoint policy")
+        contents.append((PurePosixPath("home/" + relative), raw, False))
+        total += len(raw)
+    if total > MAX_BYTES or len(contents) > MAX_FILES:
+        raise ProvisionError("Environment exceeds the bundle size/file limit")
     included = {str(member.relative_to("home")) for member, _, _ in contents}
+    dependencies = bundle.get("dependencies", [])
+    preflight_dependencies(dependencies, final, included, all_profiles=True)
     for settings in configs:
         validate_dependencies(settings, final, included, request.get("remote", False))
+    readiness = [{"native_profile": name,
+                  "missing_environment": preflight_dependencies(dependencies, final, included, selected=name)}
+                 for name in [None, *bundle["native_profiles"]]]
+    for entry in readiness:
+        entry["state"] = "blocked" if entry["missing_environment"] else "ready"
     policy = bundle["credential_policy"]
     # Copy policy may use provider credentials embedded in config rather than a
     # login file. Readiness does not claim provider connectivity or authorization.
@@ -779,11 +1148,13 @@ def prepare(request):
               "display_name": bundle["display_name"],
               "native_profiles": bundle["native_profiles"], "home": str(final),
               "cli_version": version, "credential_policy": policy,
+              "dependencies": dependencies, "profile_readiness": readiness,
               "authentication": "file_provisioned" if auth is not None or "home/" + auth_name in seen else "native_provider_config"}
     if final.exists():
-        previous = verify({"home": str(final), "deployment_id": deployment_id})
+        previous = verify({"home": str(final), "deployment_id": deployment_id, "preparing": True})
         if previous.get("bundle_digest") != expected:
             raise ProvisionError("Owned environment identity mismatch")
+        previous["profile_readiness"] = readiness
         if request.get("dry_run"):
             return {**previous, "dry_run": True, "file_count": len(contents), "bytes": total}
         return previous
@@ -794,6 +1165,10 @@ def prepare(request):
         raise ProvisionError("Managed deployment root must not be a symlink")
     stage = Path(tempfile.mkdtemp(prefix=".staging-", dir=root))
     try:
+        for item in dependencies:
+            if item["kind"] == "directory":
+                safe_member("home/" + item["reference"])
+                (stage / item["reference"]).mkdir(parents=True, exist_ok=True, mode=0o700)
         for member, raw, executable in contents:
             dest = stage.joinpath(*member.parts[1:])
             dest.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -807,6 +1182,9 @@ def prepare(request):
         config_integrity = {str(member.relative_to("home")): digest(pinned_config(tomllib.loads(raw.decode())))
                             for member, raw, _ in contents if bundle["kind"] == "codex" and len(member.parts) == 2
                             and (member.name == "config.toml" or member.name.endswith(".config.toml"))}
+        if bundle["kind"] == "claude":
+            config_integrity.update({str(member.relative_to("home")): digest(pinned_claude_registry(json.loads(raw.decode())))
+                                     for member, raw, _ in contents if str(member) == "home/.claude.json"})
         manifest = {**result, "integrity": integrity, "config_integrity": config_integrity}
         (stage / ".taskr-environment.json").write_text(json.dumps(manifest))
         (stage / ".taskr-environment.json").chmod(0o600)
@@ -837,7 +1215,9 @@ def verify(request):
     result = json.loads(manifest.read_text())
     if result["deployment_id"] != request["deployment_id"] or result["home"] != str(path):
         raise ProvisionError("Prepared environment identity mismatch")
-    native_version(result["kind"])
+    version = native_version(result["kind"])
+    if tuple(map(int, version.split("."))) < tuple(map(int, result["cli_version"].split("."))):
+        raise ProvisionError("Destination coding CLI is older than the prepared environment")
     for relative, expected in result.get("integrity", {}).items():
         member = safe_member("home/" + relative)
         file = path.joinpath(*member.parts[1:])
@@ -845,11 +1225,16 @@ def verify(request):
             raise ProvisionError("Prepared configuration or skills changed; sync a new revision")
         if hashlib.sha256(file.read_bytes()).hexdigest() != expected:
             semantic = result.get("config_integrity", {}).get(relative)
-            if (result["kind"] != "codex" or semantic is None or file.suffix != ".toml"
-                    or digest(pinned_config(read_config(file))) != semantic):
+            semantic_match = semantic is not None and (
+                (result["kind"] == "codex" and file.suffix == ".toml" and digest(pinned_config(read_config(file))) == semantic)
+                or (result["kind"] == "claude" and file.name == ".claude.json" and digest(pinned_claude_registry(read_config(file))) == semantic))
+            if not semantic_match:
                 raise ProvisionError("Prepared configuration or skills changed; sync a new revision")
     if result["authentication"] == "file_provisioned" and not (path / AUTH_FILES[result["kind"]]).is_file():
         raise ProvisionError("Prepared native login file is missing")
+    missing = preflight_dependencies(result.get("dependencies", []), path, selected=request.get("native_profile"))
+    if missing and not request.get("preparing"):
+        raise ProvisionError("Required endpoint environment variables are missing: " + ", ".join(missing))
     return result
 
 

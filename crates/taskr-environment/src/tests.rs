@@ -200,6 +200,157 @@ async fn local_sync_persists_ready_native_choices_without_login_contents() {
 }
 
 #[tokio::test]
+async fn blocked_profiles_are_not_advertised_refresh_rechecks_and_launch_checks_selected_profile() {
+    let fixture = Fixture::new();
+    let variable = format!("TASKR_FIXTURE_KEY_{}", uuid::Uuid::new_v4().simple());
+    std::fs::write(
+        fixture.source.join("zai.config.toml"),
+        format!("model_provider='ZAI'\n[model_providers.ZAI]\nenv_key='{variable}'\n"),
+    )
+    .unwrap();
+    let catalog = fixture.catalog();
+    let source = fixture.discover(&catalog).await;
+    assert!(source.dependencies.iter().any(|d| d.reference == variable));
+    let job = catalog
+        .sync(fixture.herdr.clone(), fixture.request(&source, "local"))
+        .await
+        .unwrap();
+    let ready = settled(&catalog, &job.sync_job_id).await;
+    assert_eq!(ready.state, "ready", "{:?}", ready.error);
+    assert_eq!(ready.launch_profile_ids.len(), 2);
+    assert!(catalog
+        .list("local")
+        .unwrap()
+        .iter()
+        .all(|c| c.native_profile.as_deref() != Some("zai")));
+    assert!(ready
+        .prepared
+        .as_ref()
+        .unwrap()
+        .profile_readiness
+        .iter()
+        .any(|p| {
+            p.native_profile.as_deref() == Some("zai")
+                && p.state == "blocked"
+                && p.missing_environment == [variable.clone()]
+        }));
+    let mut config = fixture.config.clone();
+    config
+        .environment
+        .insert(variable, "fixture-provider-secret-never-persist".into());
+    let provisioned = EnvironmentCatalog::open(&fixture.root.join("store"), config).unwrap();
+    let mut request = fixture.request(&source, "local");
+    request.refresh = true;
+    let refresh = provisioned
+        .sync(fixture.herdr.clone(), request)
+        .await
+        .unwrap();
+    let refreshed = settled(&provisioned, &refresh.sync_job_id).await;
+    assert_eq!(refreshed.state, "ready", "{:?}", refreshed.error);
+    assert_eq!(refreshed.launch_profile_ids.len(), 3);
+    assert_eq!(
+        ready.prepared.unwrap().home,
+        refreshed.prepared.unwrap().home
+    );
+    let zai = provisioned
+        .list("local")
+        .unwrap()
+        .into_iter()
+        .find(|c| c.native_profile.as_deref() == Some("zai"))
+        .unwrap();
+    provisioned
+        .verify(&fixture.herdr, "local", &zai.profile.id)
+        .await
+        .unwrap();
+    let missing = fixture.catalog();
+    assert!(missing
+        .verify(&fixture.herdr, "local", &zai.profile.id)
+        .await
+        .unwrap_err()
+        .contains("environment"));
+    let mut request = fixture.request(&source, "local");
+    request.refresh = true;
+    let refresh = missing.sync(fixture.herdr.clone(), request).await.unwrap();
+    let blocked = settled(&missing, &refresh.sync_job_id).await;
+    assert_eq!(blocked.state, "ready", "{:?}", blocked.error);
+    assert_eq!(missing.list("local").unwrap().len(), 2);
+    assert!(missing
+        .registry
+        .lock()
+        .unwrap()
+        .choices
+        .iter()
+        .any(|c| c.profile.id == zai.profile.id));
+    let bytes = std::fs::read(fixture.root.join("store/taskr.db")).unwrap();
+    assert!(!String::from_utf8_lossy(&bytes).contains("fixture-provider-secret-never-persist"));
+}
+
+#[tokio::test]
+async fn remote_helper_credentials_rotate_over_stdin_and_old_home_is_preserved() {
+    let fixture = Fixture::new();
+    std::fs::remove_file(fixture.source.join("review.config.toml")).unwrap();
+    std::fs::create_dir(fixture.source.join("credentials")).unwrap();
+    let key = fixture.source.join("credentials/zai-key");
+    std::fs::write(&key, "fixture-helper-secret-never-persist").unwrap();
+    std::fs::write(
+        fixture.source.join("config.toml"),
+        format!(
+            "model_provider='ZAI'\n[model_providers.ZAI.auth]\ncommand='cat'\nargs=[{}]\n",
+            serde_json::to_string(&key.display().to_string()).unwrap(),
+        ),
+    )
+    .unwrap();
+    let catalog = fixture.catalog();
+    let source = fixture.discover(&catalog).await;
+    let job = catalog
+        .sync(fixture.herdr.clone(), fixture.request(&source, "remote-a"))
+        .await
+        .unwrap();
+    let ready = settled(&catalog, &job.sync_job_id).await;
+    assert_eq!(ready.state, "ready", "{:?}", ready.error);
+    let prepared = ready.prepared.unwrap();
+    let deployed_key = PathBuf::from(&prepared.home).join("credentials/zai-key");
+    assert_eq!(
+        std::fs::read_to_string(&deployed_key).unwrap(),
+        "fixture-helper-secret-never-persist"
+    );
+    assert_eq!(
+        std::fs::metadata(&deployed_key)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    std::fs::write(&key, "fixture-rotated-helper-key").unwrap();
+    assert_eq!(
+        fixture.discover(&catalog).await.source_revision,
+        source.source_revision
+    );
+    let mut request = fixture.request(&source, "remote-a");
+    request.refresh = true;
+    let refresh = catalog.sync(fixture.herdr.clone(), request).await.unwrap();
+    let refreshed = settled(&catalog, &refresh.sync_job_id).await;
+    assert_eq!(refreshed.state, "ready", "{:?}", refreshed.error);
+    assert_ne!(prepared.home, refreshed.prepared.unwrap().home);
+    assert_eq!(
+        std::fs::read_to_string(deployed_key).unwrap(),
+        "fixture-helper-secret-never-persist"
+    );
+    catalog
+        .verify(&fixture.herdr, "remote-a", &ready.launch_profile_ids[0])
+        .await
+        .unwrap();
+    for file in [
+        fixture.root.join("store/taskr.db"),
+        fixture.root.join("ssh-args.jsonl"),
+    ] {
+        assert!(!String::from_utf8_lossy(&std::fs::read(file).unwrap())
+            .contains("fixture-helper-secret-never-persist"));
+    }
+}
+
+#[tokio::test]
 async fn changed_sources_fail_and_new_revisions_preserve_old_choices() {
     let fixture = Fixture::new();
     let catalog = fixture.catalog();
@@ -450,6 +601,7 @@ fn invalid_policy_and_relative_endpoint_paths_are_rejected() {
         kind: "codex".into(),
         cli_version: "0.160.0".into(),
         native_profiles: vec![],
+        dependencies: vec![],
         source_location: None,
     };
     let mut request = fixture.request(&source, "local");

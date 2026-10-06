@@ -13,6 +13,7 @@ import socket
 import subprocess
 import tempfile
 import time
+import tomllib
 import urllib.error
 import urllib.request
 import zipfile
@@ -28,12 +29,21 @@ source.mkdir(parents=True)
 (source / "config.toml").write_text('model="base-test"\n')
 (source / "review.config.toml").write_text('model="review-test"\n[mcp_servers.profile_probe]\ncommand="/bin/echo"\n')
 (source / "auth.json").write_text('{"OPENAI_API_KEY":"fixture-source-key"}')
+key = source / "credentials/zai-key"
+key.parent.mkdir()
+key.write_text("fixture-source-helper-key")
+(source / "glm.config.toml").write_text('model="glm-fixture"\nmodel_provider="ZAI"\n'
+    '[model_providers.ZAI.auth]\ncommand="cat"\nargs=[' + json.dumps(str(key)) + ']\n')
+(source / "blocked.config.toml").write_text('model_provider="env-fixture"\n'
+    '[model_providers.env-fixture]\nenv_key="TASKR_SMOKE_REQUIRED_PROVIDER_KEY"\n')
 skill = source / "skills/proof/SKILL.md"
 skill.parent.mkdir(parents=True)
 skill.write_text("---\nname: taskr-fixture-proof\ndescription: A fixture skill.\n---\nFixture instructions.\n")
 login = root / "endpoint-login"
 login.mkdir()
 (login / "auth.json").write_text('{"OPENAI_API_KEY":"fixture-endpoint-key"}')
+(login / "credentials").mkdir()
+(login / "credentials/zai-key").write_text("fixture-endpoint-helper-key")
 bin_dir = root / "bin"
 bin_dir.mkdir()
 remote_id = "0123456789abcdef0123456789abcdef"
@@ -74,6 +84,7 @@ if args.execution_ports:
     environment.update({"PROOF_WRITE_NATIVE_HISTORY": "1", "PROOF_MACHINE_CATALOG": json.dumps([
         {"id":remote_id, "target":"fixture-host", "enabled":True}])})
 environment.pop("TASKR_MCP_TOKEN", None)
+environment.pop("TASKR_SMOKE_REQUIRED_PROVIDER_KEY", None)
 controller = None
 session = None
 base = None
@@ -199,14 +210,19 @@ try:
     dry = wait(tool("admin_environment_sync", {**request, "dry_run": True}))
     assert not dry["launch_profile_ids"] and not Path(dry["prepared"]["home"]).exists()
     local = wait(tool("admin_environment_sync", request))
-    assert len(local["launch_profile_ids"]) == 2
+    assert len(local["launch_profile_ids"]) == 3
+    assert any(p["native_profile"] == "blocked" and p["missing_environment"] == ["TASKR_SMOKE_REQUIRED_PROVIDER_KEY"]
+               for p in local["prepared"]["profile_readiness"])
     deployed = Path(local["prepared"]["home"])
     assert "fixture-endpoint-key" in (deployed / "auth.json").read_text()
     assert (deployed / "skills/proof/SKILL.md").read_text() == skill.read_text()
+    helper = tomllib.loads((deployed / "glm.config.toml").read_text())["model_providers"]["ZAI"]["auth"]
+    assert Path(helper["args"][0]).read_text() == "fixture-endpoint-helper-key"
+    assert Path(helper["args"][0]).is_relative_to(deployed)
     assert not tool("list_launch_profiles", {"endpoint_id": remote_id})["profiles"]
     remote = wait(tool("admin_environment_sync", {**request, "endpoint_id": remote_id,
                   "deployment_root": str(root / "remote-deployments")}))
-    assert len(tool("list_launch_profiles", {"endpoint_id": remote_id})["profiles"]) == 2
+    assert len(tool("list_launch_profiles", {"endpoint_id": remote_id})["profiles"]) == 3
     (root / "slow").touch()
     canceled = tool("admin_environment_sync", {**request, "refresh": True})
     assert tool("admin_environment_sync_cancel", {"sync_job_id": canceled["sync_job_id"]})["state"] == "canceled"
@@ -263,16 +279,26 @@ try:
     assert tool("task_get", {"task_id": task["id"]})["task"]["title"] == task["title"]
     reopened_zip = wait(tool("admin_environment_sync", {**zip_request, "refresh": True}))
     assert reopened_zip["launch_profile_ids"] == zip_ready["launch_profile_ids"]
-    assert len(tool("list_launch_profiles", {"endpoint_id": "local"})["profiles"]) == 6
+    assert len(tool("list_launch_profiles", {"endpoint_id": "local"})["profiles"]) == 7
     stop()
     start(admin=False)
-    assert len(tool("list_launch_profiles", {"endpoint_id": "local"})["profiles"]) == 6
+    assert len(tool("list_launch_profiles", {"endpoint_id": "local"})["profiles"]) == 7
     assert tool("admin_environment_sync_status", {"sync_job_id": local["sync_job_id"]}, refuse=True)
     tool("admin_environment_discover", {"homes": [str(source)]}, refuse=True)
     execution_checks = []
     if args.execution_ports:
         workspace = root / "workspace"
         workspace.mkdir()
+        glm = next(p for p in tool("list_launch_profiles", {"endpoint_id":"local"})["profiles"] if p["native_profile"] == "glm")
+        helper_path = Path(helper["args"][0])
+        helper_contents = helper_path.read_bytes()
+        helper_path.unlink()
+        calls_before = (root / "herdr.jsonl").read_text()
+        tool("start_coding_session", {"task_id":task["id"], "endpoint_id":"local", "launch_profile_id":glm["id"], "workspace_path":str(workspace)}, refuse=True)
+        after = (root / "herdr.jsonl").read_text()[len(calls_before):]
+        assert not any(json.loads(line)[:2] in (["workspace", "create"], ["tab", "create"], ["pane", "split"]) for line in after.splitlines())
+        helper_path.write_bytes(helper_contents)
+        helper_path.chmod(0o600)
         launch = tool("start_coding_session", {"task_id":task["id"], "endpoint_id":"local", "launch_profile_id":local["launch_profile_ids"][0], "workspace_path":str(workspace)})
         original = launch["execution"]
         assert original["runtime_generation"] and original["agent_session"]
@@ -304,18 +330,19 @@ try:
         tool("execution_resume", {"execution_id":original["execution_id"]}, refuse=True)
         after = (root / "herdr.jsonl").read_text()[len(calls_before):]
         assert not any(json.loads(line)[:2] in (["workspace", "create"], ["tab", "create"], ["pane", "split"]) for line in after.splitlines())
-        execution_checks = ["pinned launch and generation", "verified exit/pane close", "restored native history resume", "stale namespace refusal", "restart namespace recovery", "new generation resume", "missing history refuses allocation"]
+        execution_checks = ["missing helper credential refuses allocation", "pinned launch and generation", "verified exit/pane close", "restored native history resume", "stale namespace refusal", "restart namespace recovery", "new generation resume", "missing history refuses allocation"]
     calls = (root / "herdr.jsonl").read_text()
     if not args.execution_ports:
         assert not any(word in calls for word in ['"workspace"', '"agent"', '"pane"'])
     db = (root / "store/taskr.db").read_bytes()
-    assert all(secret not in db for secret in [b"fixture-endpoint-key", b"fixture-source-key", b"fixture-import-key"])
+    assert all(secret not in db for secret in [b"fixture-endpoint-key", b"fixture-source-key", b"fixture-import-key", b"fixture-endpoint-helper-key", b"fixture-source-helper-key"])
     report = {"passed": True, "local_choices": local["launch_profile_ids"], "remote_choices": remote["launch_profile_ids"],
               "imported_folder_home": str(folder_home), "imported_zip_home": str(zip_home), "remote_zip_choices": remote_zip["launch_profile_ids"],
               "checks": ["HTTP MCP schemas", "explicit endpoint", "native base/profile discovery", "dry-run", "destination login policy",
                          "skill cloning", "saved-target remote transport", "cancel", "folder and ZIP collection discovery", "imported native profiles",
                          "ambient skill isolation", "ZIP traversal refusal", "ZIP cache restart and remote sync", "restart persistence", "worker admin denial", "metadata-only SQLite",
-                         "taskr-core host store mutations", "rejected mutation rollback", "project/plan/task restart persistence"] + execution_checks,
+                         "taskr-core host store mutations", "rejected mutation rollback", "project/plan/task restart persistence",
+                         "provider helper credential policy and rebasing", "blocked profile prerequisite reporting"] + execution_checks,
               "real_agents_started": 0, "real_ssh_connections": 0, "user_controller_restarted": False}
     (root / "report.json").write_text(json.dumps(report, indent=2))
     print("Environment MCP smoke passed; evidence:", root / "report.json")

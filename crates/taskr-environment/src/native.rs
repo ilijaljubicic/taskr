@@ -70,6 +70,8 @@ pub struct AgentEnvironment {
     pub kind: String,
     pub cli_version: String,
     pub native_profiles: Vec<String>,
+    #[serde(default)]
+    pub dependencies: Vec<crate::protocol::EnvironmentDependency>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_location: Option<ImportedSource>,
 }
@@ -212,7 +214,12 @@ impl EnvironmentCatalog {
         Ok(registry
             .choices
             .iter()
-            .filter(|c| c.endpoint_id == endpoint)
+            .filter(|c| {
+                c.endpoint_id == endpoint
+                    && c.deployment
+                        .as_ref()
+                        .is_none_or(|deployment| profile_is_ready(deployment, &c.native_profile))
+            })
             .cloned()
             .collect())
     }
@@ -419,8 +426,18 @@ impl EnvironmentCatalog {
                 return Err("sync canceled; deployment was not selected".into());
             }
             job.state = "ready".into();
-            job.prepared = Some(prepared);
+            job.prepared = Some(prepared.clone());
             if !job.request.dry_run {
+                for previous in &mut registry.choices {
+                    if previous.endpoint_id == job.request.endpoint_id
+                        && previous
+                            .deployment
+                            .as_ref()
+                            .is_some_and(|d| d.deployment_id == prepared.deployment_id)
+                    {
+                        previous.deployment = Some(prepared.clone());
+                    }
+                }
                 job.launch_profile_ids = choices.iter().map(|c| c.profile.id.clone()).collect();
                 for choice in choices {
                     registry.choices.retain(|c| {
@@ -493,7 +510,7 @@ impl EnvironmentCatalog {
     ) -> Result<(), String> {
         let choice = self.choice(target.id(), Some(id))?;
         if let Some(deployment) = choice.deployment {
-            let value = self.endpoint_request(herdr, target, json!({"operation":"verify", "home":deployment.home, "deployment_id":deployment.deployment_id})).await?;
+            let value = self.endpoint_request(herdr, target, json!({"operation":"verify", "home":deployment.home, "deployment_id":deployment.deployment_id, "native_profile":choice.native_profile})).await?;
             if value["bundle_digest"] != deployment.bundle_digest {
                 return Err("Prepared environment revision mismatch".into());
             }
@@ -575,10 +592,19 @@ fn validate_sync(request: &SyncRequest) -> Result<(), String> {
     Ok(())
 }
 
+fn profile_is_ready(deployment: &PreparedEnvironment, native: &Option<String>) -> bool {
+    deployment.profile_readiness.is_empty()
+        || deployment
+            .profile_readiness
+            .iter()
+            .any(|state| &state.native_profile == native && state.state == "ready")
+}
+
 fn launch_choices(endpoint: &str, deployment: &PreparedEnvironment) -> Vec<LaunchChoice> {
     std::iter::once(None)
         .chain(deployment.native_profiles.iter().cloned().map(Some))
         .enumerate()
+        .filter(|(_, native)| profile_is_ready(deployment, native))
         .map(|(index, native)| {
             let mut args = if deployment.kind == "codex" {
                 vec!["--no-daemon".into(), "--no-alt-screen".into()]

@@ -17,13 +17,13 @@ installation is required. It prepares files; Herdr remains the agent executor.
    `homes: ["/home/user/.codex-work"]`. To import a native home or collection,
    use `source_path: "/path/to/environments"` or
    `source_path: "/path/to/environments.zip"` instead. Read the returned environment IDs,
-   revisions, native profile names, and discovery issues.
+   revisions, native profile names, dependency metadata, and discovery issues.
 2. Pick an `endpoint_id` from `list_endpoints`.
 3. Call `admin_environment_sync` with the selected `source_environment_id`,
    `source_revision`, `endpoint_id`, and explicit `credential_policy`.
 4. Poll `admin_environment_sync_status` using the returned `sync_job_id`.
    `queued` and `preparing` are in progress; `ready` returns prepared
-   `launch_profile_ids`; `failed` reports setup errors. Cancel unfinished jobs
+   `launch_profile_ids` and `prepared.profile_readiness`; `failed` reports setup errors. Cancel unfinished jobs
    with `admin_environment_sync_cancel`.
 5. Call `list_launch_profiles({"endpoint_id":"local"})` (or the remote ID)
    and select a returned ID for `start_coding_session` or a task `run_spec`.
@@ -51,14 +51,52 @@ Example sync using login already provisioned on the destination:
 }
 ```
 
-`credential_policy="endpoint"` excludes source login files and rejects recognized
-embedded credentials in configuration. It copies the selected destination's
-native login file into the managed home. `credential_policy="copy"` explicitly
-permits transferring source login files and embedded configuration credentials.
+`credential_policy="endpoint"` excludes source login/helper credential files and
+rejects recognized embedded credentials in configuration. `endpoint_auth_home`
+supplies destination credentials: native login files when the selected providers
+need them, and helper credential files at the relative paths reported in
+`dependencies`. A helper-only or environment-key provider does not need an
+unrelated `auth.json`. `credential_policy="copy"` explicitly permits transferring
+source login files, helper credential files, and embedded configuration credentials.
 There is no implicit credential transfer. OS keychains and provider/MCP OAuth
 stores are not cloned. Provider access is not probed by sync; readiness confirms
 files/dependencies, not that a provider will accept the login. Review source
 configuration and provision target service credentials when needed.
+
+The dependency inventory follows nested agent configuration, model catalogs,
+instructions, provider auth helpers, MCP commands, notification commands, and
+Claude `apiKeyHelper`. Paths are rebased into the prepared home, including
+absolute, `~/`, and configuration-relative references. Command file arguments
+use an explicit command `cwd`; ambiguous relative arguments are rejected.
+External working directories contain the declared dependencies, not a copy of
+the whole source directory. Common system programs are checked on endpoint PATH;
+custom executable scripts are copied. Native binaries, interpreter packages,
+services, keychains and OAuth logins must be provisioned on the endpoint.
+
+Sync never executes helpers, hooks, MCP servers or notification scripts.
+Inline shell/interpreter code and non-`cat` credential helpers require
+[`taskr-dependencies.json`](environment-dependencies.md) declarations for their
+files and required environment variables. Script bodies are not interpreted;
+declare their indirect dependencies there. Missing source files, endpoint
+programs, or helper credentials fail preparation. Graph cycles and excessive
+depth are rejected rather than leaving partial configuration.
+
+Required variables such as a selected provider's `env_key` are checked without
+reading their values into the registry. `prepared.profile_readiness` identifies
+blocked native profiles and their `missing_environment` names; only ready
+profiles receive launch IDs. Requirements use the effective base/profile
+configuration. Optional provider `env_http_headers` are not required. Make the
+variables available to both the endpoint companion and the Herdr agent process,
+then use `refresh=true` to publish newly ready choices. Variables are not copied
+from the controller or saved as launch secrets. Launch verification rechecks the
+selected profile's variables, executable availability, cwd, files and CLI version.
+
+Claude user MCP definitions come from its native `.claude.json` registry. Sync
+extracts MCP configuration and excludes sign-in, trust, history and unrelated
+metadata. Project-local definitions retain project scope and require explicit
+source-to-endpoint project mappings in the dependency manifest. Repository
+`.mcp.json` files stay with the repository. Native trust/sign-in writes may change
+the deployed registry; changing its MCP definitions still invalidates verification.
 
 Native `hooks.json` commands and their explicit script dependencies are included
 and checked. Codex may request hook review after paths change during cloning.
@@ -70,11 +108,14 @@ settings, hook commands and bundled scripts remain pinned.
 repair. Identical content reuses its deployment; changed content/credentials
 create a new one. `deployment_root` optionally selects an absolute or `~/` managed
 root on the endpoint; its default is `~/.local/share/taskr/environments`.
+Helper credential contents, like native login contents, do not change an
+installed home's discovery revision; they do change the deployment digest when
+exported with `copy`. Configuration and script changes require rediscovery.
 
 Discovery currently supports Codex homes with `config.toml` and Claude homes
 with `settings.json`. Codex requires 0.134.0+ and the advertised `--profile`, `--no-daemon`, and
 `--no-alt-screen` capabilities; native `*.config.toml` profiles
-remain native and yield a base choice plus one choice per profile. Legacy inline
+remain native and yield a base choice plus one choice per ready profile. Legacy inline
 Codex profile tables require native migration first. The destination CLI must
 be at least as new as the source. Claude currently yields its base settings
 choice; Claude plugin installations are reported as unsupported rather than

@@ -77,16 +77,19 @@ names still come from the home's files; no TASKR launch presets are defined here
 `original_home` maps original absolute references into the selected packaged
 home. `original_user_home` maps references into a mirrored collection root:
 `/home/alice/instructions.md` needs `environments/instructions.md`. Relative
-dependencies resolve from the selected home; `~/` resolves from the collection
+configuration file dependencies resolve from the declaring file's directory;
+command arguments use their explicit cwd or dependency declaration. `~/` resolves from the collection
 root. Dependencies outside the collection and escaping symlinks are rejected.
 TASKR does not read an old absolute path from the controller as a fallback.
 
 Native `hooks.json` and declarative hooks in settings are included. Direct hook
 executables and script arguments to common interpreters are bundled and checked
-without running them. Script paths must be absolute or `~/` paths, with manifest
-aliases mapping original locations into the collection. Wrapper commands and
-inline shell code do not provide a complete static dependency list; provision
-any additional runtime dependencies explicitly on the endpoint.
+without running them. Use absolute or `~/` script paths, with manifest aliases
+mapping original locations into the collection, or declare an explicit cwd and
+dependency list for relative arguments. Wrapper commands and
+inline shell code require explicit file/environment declarations in a
+home-local [taskr-dependencies.json](environment-dependencies.md). Credential
+helpers obey the same explicit credential policy as native login files.
 
 Codex shared user skills come from the supplied `user_skills` directory or the
 collection's `.agents/skills`. They are materialized under the deployed home's
@@ -112,7 +115,7 @@ homes and execution histories remain pinned and usable.
 ZIP caches live under `<store-path>/agent-environment-sources`. Directories use
 mode 0700; files use 0600, or 0700 for executable dependencies. A selected archive
 can contain login files, so its private cache can too. `credential_policy="endpoint"`
-excludes source login files from endpoint transfer; `copy` explicitly permits
+excludes source login and helper credential files from endpoint transfer; `copy` explicitly permits
 them. Credentials and file contents never enter the SQLite catalog or discovery
 responses. Source histories may exist in an archive cache but are excluded from
 environment deployment.

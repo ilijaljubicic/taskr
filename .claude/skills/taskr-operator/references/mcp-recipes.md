@@ -236,10 +236,33 @@ Cancel unfinished setup:
 {"jsonrpc":"2.0","id":27,"method":"tools/call","params":{"name":"admin_environment_sync_cancel","arguments":{"sync_job_id":"<job ID>"}}}
 ```
 
-`endpoint` uses destination login files and rejects recognized embedded source
+`endpoint` uses required destination login/helper credential files beneath
+`endpoint_auth_home` and rejects recognized embedded source
 credentials. `copy` explicitly permits cloning source file credentials; never
 select it implicitly. Credentials and bundles stay out of SQLite and tool
 responses. Provider connectivity and OAuth/keychain migration are separate.
+
+Inspect `prepared.profile_readiness` in sync status: blocked profiles report
+`missing_environment` names and receive no launch IDs. Supply these variables
+to both the endpoint companion and Herdr agent process, then refresh. Launch
+verification rechecks the selected native profile. Never persist secret values
+in run-spec or launch-profile environment metadata.
+
+For a Codex profile using `cat /absolute/path/to/key` as its provider helper,
+copy policy includes that private key file and rebases the helper argument.
+Endpoint policy excludes it and expects the reported managed relative path
+beneath `endpoint_auth_home`; it requires no `auth.json` for a helper-only
+provider. Helper-key rotation changes the deployment digest; refresh preserves
+the old home and conversation. Config/script edits require rediscovery.
+
+Opaque commands and non-cat auth helpers require a native-home
+`taskr-dependencies.json` declaration for indirect files and required variables.
+No helper/MCP script runs during sync. Nested role configs, catalogs, scripts
+and explicit cwd dependencies are followed and rebased; ambiguous relative
+command files fail rather than guessing the task workspace. Claude registry
+MCP configuration is extracted without login/trust metadata; project-local
+definitions require explicit project mappings and never become global. See
+`docs/environment-dependencies.md` in the TASKR repository for the manifest.
 
 Codex homes contain `config.toml` and optional native `*.config.toml` profiles;
 Claude homes contain `settings.json`. Skills and configured Codex plugin content

@@ -190,6 +190,24 @@ User-facing surfaces to keep aligned:
   integrity allows that runtime metadata while checking all other settings,
   hook declarations and script contents. Native trust review is distinct from
   prepared-environment readiness.
+- Use the companion's shared dependency inventory for native config graphs,
+  provider helpers, MCP/notify commands and Claude API helpers. Resolve file
+  references against their declaring config or explicit command cwd, rebase
+  them into the deployment, and reject cycles or ambiguous relative commands.
+  Opaque commands and non-cat credential helpers require home-local
+  `taskr-dependencies.json` declarations; never execute them during setup.
+- Credential files obey explicit copy/endpoint policy, including declared helper
+  data. Keep credential bytes out of discovery/SQLite/argv and include allowed
+  transfers in deployment digests. Endpoint helper/env providers must not demand
+  an unrelated native login file. Preserve old homes on rotation.
+- Compute prerequisite metadata from effective native profiles. Only ready
+  profiles publish choices; report missing variable names without their values,
+  recheck the selected profile before launch/resume, and refresh readiness when
+  endpoint variables change. Metadata defaults keep retained deployments readable.
+- Extract Claude registry MCP configuration only. Preserve project scope using
+  explicit mappings; exclude trust/sign-in/history and permit native metadata
+  writes while pinning MCP definitions. Document manifest contracts in
+  `docs/environment-dependencies.md` and test imports without ambient fallback.
 - Discovery supports installed homes or `source_path` collection folders/ZIPs.
   Preserve source provenance across restart; imports cannot read dependencies or
   user skills outside their collection. Keep ZIP extraction bounded, private and
