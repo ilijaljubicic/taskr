@@ -604,13 +604,12 @@ checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 
 [[package]]
 name = "hyper"
-version = "1.11.1"
+version = "1.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "27b501faa50e7a26c3d3560ca625132f4078a17771f4810baf70475ae48cbe43"
+checksum = "2c3e324da4c95177d6291d4c8730197c0d1822f8a9766814a4a44fa5ab797c9c"
 dependencies = [
  "atomic-waker",
  "bytes",
- "futures-channel",
  "futures-core",
  "http",
  "http-body",
@@ -1186,14 +1185,14 @@ checksum = "0bf256ce5efdfa370213c1dabab5935a12e49f2c58d15e9eac2870d3b4f27263"
 
 [[package]]
 name = "taskr"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "taskr-controller",
 ]
 
 [[package]]
 name = "taskr-controller"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "axum",
  "clap",
@@ -1211,7 +1210,7 @@ dependencies = [
 
 [[package]]
 name = "taskr-core"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -1220,7 +1219,7 @@ dependencies = [
 
 [[package]]
 name = "taskr-environment"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "rusqlite",
  "serde",
@@ -1233,7 +1232,7 @@ dependencies = [
 
 [[package]]
 name = "taskr-herdr"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -1598,18 +1597,18 @@ dependencies = [
 
 [[package]]
 name = "zerocopy"
-version = "0.8.59"
+version = "0.8.60"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6df92bf3d9227be3d53173901ddbffac2babc27ae50f397776ffd6dc33f800cb"
+checksum = "6400fc4bb7426f6faac3fb07566122bb18622e3022bd2c36426a92ed489b1dbe"
 dependencies = [
  "zerocopy-derive",
 ]
 
 [[package]]
 name = "zerocopy-derive"
-version = "0.8.59"
+version = "0.8.60"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ac4f328cf2f05d084e496c3e9c3f33ed0a183656a16e1fcec4d464d8373aec82"
+checksum = "99c27cc7525bad4df59a45e073c45b2c2aa820efb588234cc23a547ec69a34db"
 dependencies = [
  "proc-macro2",
  "quote",
