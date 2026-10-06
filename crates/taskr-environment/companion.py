@@ -165,14 +165,26 @@ class DependencyInventory:
         if not absolute and not re.fullmatch(r"[A-Za-z0-9_+.-]+", program):
             raise ProvisionError("Shell assignments and expressions require an explicit executable wrapper")
         if absolute and name not in SYSTEM_COMMANDS:
-            executable, relative = self.collect(program, base, destination, profiles, context)
+            executable = self.resolve(program, base)
             if not executable.stat().st_mode & 0o111:
                 raise ProvisionError("A bundled command executable is not executable")
-            if executable.read_bytes()[:4] in {b"\x7fELF", b"\xcf\xfa\xed\xfe", b"\xfe\xed\xfa\xcf"}:
-                raise ProvisionError("Native binaries must be provisioned on the endpoint PATH")
-            self.record("bundled_executable", relative, profiles, context)
-            header = executable.read_bytes()[:4096].split(b"\n", 1)[0]
-            if header.startswith(b"#!"):
+            with executable.open("rb") as stream:
+                head = stream.read(4096)
+            binary = head[:4] in {b"\x7fELF", b"\xcf\xfa\xed\xfe", b"\xfe\xed\xfa\xcf",
+                                   b"\xce\xfa\xed\xfe", b"\xfe\xed\xfa\xce",
+                                   b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca"} or b"\0" in head
+            if binary:
+                # This is an endpoint-installed program, not a portable script.
+                # Preserve its configured endpoint path; never package its bytes
+                # or redirect it into the managed home through prefix rebasing.
+                reference = program if program.startswith(("/", "~/")) else str(executable)
+                self.record("executable", reference, profiles, context)
+                self.mappings.setdefault(destination, {})[program] = "@program:" + reference
+            else:
+                _, relative = self.collect(program, base, destination, profiles, context)
+                self.record("bundled_executable", relative, profiles, context)
+            header = head.split(b"\n", 1)[0]
+            if not binary and header.startswith(b"#!"):
                 try:
                     interpreter = shlex.split(header[2:].decode())
                 except (UnicodeError, ValueError):
@@ -185,9 +197,9 @@ class DependencyInventory:
                         raise ProvisionError("Unsupported bundled executable env interpreter")
                     self.record("executable", interpreter[1], profiles, context)
         else:
-            self.record("executable", name if absolute else program, profiles, context)
+            self.record("executable", program, profiles, context)
             if absolute:
-                self.mappings.setdefault(destination, {})[program] = "@program:" + name
+                self.mappings.setdefault(destination, {})[program] = "@program:" + program
         opaque = any(a in {"-c", "-e", "--eval", "-m"} for a in args) or any(
             re.search(r"[|;&`]|\$\(", a) for a in [program, *args])
         if (opaque or (auth and name != "cat")) and declaration is None:
@@ -940,7 +952,8 @@ def adapt_text(raw, source, final_home, suffix, relative=None):
     pairs.update({old: str(final_home / relative) for old, relative in source.get("path_mappings", {}).items()})
     def mapped(value):
         if value.startswith("@program:"):
-            return value[len("@program:"):]
+            program = value[len("@program:"):]
+            return str(Path(program).expanduser()) if program.startswith("~/") else program
         if value.startswith("@argument:"):
             flag, path = value[len("@argument:"):].split("=", 1)
             return flag + "=" + str(final_home / path)
@@ -1033,7 +1046,8 @@ def preflight_dependencies(dependencies, home, included=None, selected=None, all
             if not os.environ.get(reference):
                 missing_environment.add(reference)
         elif kind == "executable":
-            if not shutil.which(reference):
+            program = str(Path(reference).expanduser()) if reference.startswith("~/") else reference
+            if not shutil.which(program):
                 context = "MCP" if item["context"] in {"mcp_servers", "mcpServers"} else "Command"
                 raise ProvisionError(context + " executable is missing on the endpoint: " + reference)
         else:

@@ -124,6 +124,9 @@ Environment setup and launch selection:
   helpers require `taskr-dependencies.json` in the native home for indirect files
   and required variables. Consult `docs/environment-dependencies.md`; do not
   silently omit a script, credential, cwd or nested configuration dependency.
+- Absolute native binary/interpreter paths are preserved and checked on the
+  endpoint, including runtimes outside PATH. A missing executable needs endpoint
+  provisioning; do not shorten its configured path or copy a native binary.
 - Claude `.claude.json` user MCP definitions are extracted without trust/login
   metadata. Project-local MCP definitions need explicit project path mappings
   and keep their scope; repository `.mcp.json` remains repository-owned.

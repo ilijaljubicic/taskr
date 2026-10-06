@@ -284,6 +284,62 @@ class DependencyTests(unittest.TestCase):
         with self.assertRaisesRegex(c.ProvisionError, "configuration cannot be classified"):
             self.bundle()
 
+    def test_absolute_native_binary_is_endpoint_prerequisite_not_bundle_content(self):
+        binary = self.home / "bin/native-mcp"
+        binary.parent.mkdir()
+        with binary.open("wb") as stream:
+            stream.write(b"\x7fELF")
+            stream.truncate(c.MAX_BYTES + 1)
+        binary.chmod(0o700)
+        (self.home / "config.toml").write_text('[mcp_servers.native]\ncommand=' + json.dumps(str(binary)) + '\n')
+        bundle = self.bundle()
+        self.assertFalse(any(f["path"].endswith("native-mcp") for f in bundle["files"]))
+        result = self.prepare()
+        command = tomllib.loads((Path(result["home"]) / "config.toml").read_text())["mcp_servers"]["native"]["command"]
+        self.assertEqual(command, str(binary))
+        binary.unlink()
+        with self.assertRaisesRegex(c.ProvisionError, "executable is missing"):
+            c.verify(result)
+
+    def test_destination_must_provision_the_configured_native_binary_path(self):
+        binary = self.root / "installed/native-mcp"
+        binary.parent.mkdir()
+        binary.write_bytes(b"\x7fELFfixture")
+        binary.chmod(0o700)
+        (self.home / "config.toml").write_text('[mcp_servers.native]\ncommand=' + json.dumps(str(binary)) + '\n')
+        bundle = self.bundle()
+        binary.unlink()
+        with self.assertRaisesRegex(c.ProvisionError, "executable is missing"):
+            c.prepare({"bundle": bundle, "deployment_root": str(self.root / "deployments"), "remote": True})
+        self.assertFalse((self.root / "deployments").exists())
+
+    def test_explicit_interpreter_runtime_is_preserved_when_not_on_path(self):
+        binary = self.home / "provided-runtime/bin/node"
+        binary.parent.mkdir(parents=True)
+        binary.write_bytes(b"\x7fELFfixture")
+        binary.chmod(0o700)
+        (self.home / "config.toml").write_text('[mcp_servers.native]\ncommand=' + json.dumps(str(binary)) + '\nargs=["--version"]\n')
+        with patch.dict(os.environ, {"PATH": "/nonexistent"}):
+            result = self.prepare()
+            command = tomllib.loads((Path(result["home"]) / "config.toml").read_text())["mcp_servers"]["native"]["command"]
+            self.assertEqual(command, str(binary))
+            c.verify(result)
+            binary.unlink()
+            with self.assertRaisesRegex(c.ProvisionError, "executable is missing"):
+                c.verify(result)
+
+    def test_tilde_interpreter_uses_endpoint_home_without_shortening_to_path_name(self):
+        binary = self.root / "user/runtime/bin/python3"
+        binary.parent.mkdir(parents=True)
+        binary.write_bytes(b"\x7fELFfixture")
+        binary.chmod(0o700)
+        (self.home / "config.toml").write_text('[mcp_servers.native]\ncommand="~/runtime/bin/python3"\nargs=["--version"]\n')
+        with patch.dict(os.environ, {"PATH": "/nonexistent"}):
+            result = self.prepare()
+            command = tomllib.loads((Path(result["home"]) / "config.toml").read_text())["mcp_servers"]["native"]["command"]
+            self.assertEqual(command, str(binary))
+            c.verify(result)
+
     def test_claude_default_user_registry_is_collected_without_ambient_import_fallback(self):
         claude = self.root / "user/.claude"
         claude.mkdir()

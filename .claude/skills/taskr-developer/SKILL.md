@@ -196,6 +196,10 @@ User-facing surfaces to keep aligned:
   them into the deployment, and reject cycles or ambiguous relative commands.
   Opaque commands and non-cat credential helpers require home-local
   `taskr-dependencies.json` declarations; never execute them during setup.
+- Treat configured native binary/interpreter paths as endpoint prerequisites.
+  Preserve absolute paths even when the program is outside PATH; never bundle
+  native binaries or replace a configured runtime with its basename. Copy
+  portable scripts and validate missing endpoint programs before publication.
 - Credential files obey explicit copy/endpoint policy, including declared helper
   data. Keep credential bytes out of discovery/SQLite/argv and include allowed
   transfers in deployment digests. Endpoint helper/env providers must not demand

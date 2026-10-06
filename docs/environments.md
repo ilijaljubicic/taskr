@@ -69,8 +69,10 @@ Claude `apiKeyHelper`. Paths are rebased into the prepared home, including
 absolute, `~/`, and configuration-relative references. Command file arguments
 use an explicit command `cwd`; ambiguous relative arguments are rejected.
 External working directories contain the declared dependencies, not a copy of
-the whole source directory. Common system programs are checked on endpoint PATH;
-custom executable scripts are copied. Native binaries, interpreter packages,
+the whole source directory. Bare program names are checked on endpoint PATH;
+custom executable scripts are copied. Configured absolute native binary paths
+are preserved and checked on the endpoint rather than bundled or rebased.
+Native binaries, interpreter packages,
 services, keychains and OAuth logins must be provisioned on the endpoint.
 
 Sync never executes helpers, hooks, MCP servers or notification scripts.
